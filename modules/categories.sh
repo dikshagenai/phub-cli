@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
 
 get_categories() {
-    local response
+    local response=""
+    local urls=(
+        "https://www.pornhub.org/webmasters/categories"
+        "https://www.pornhub.com/webmasters/categories"
+    )
 
-    if ! response=$(curl -fsSL "https://www.pornhub.com/webmasters/categories"); then
+    for url in "${urls[@]}"; do
+        if response=$(curl -fsSL -m 10 -H "Accept: application/json" -H "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0" "$url" 2>/dev/null) && [ -n "$response" ]; then
+            if printf '%s' "$response" | jq -e '.categories | type == "array"' >/dev/null 2>&1; then
+                break
+            fi
+        fi
+        response=""
+    done
+
+    if [ -z "$response" ]; then
         echo "Failed to fetch categories from the API." >&2
-        return 1
-    fi
-
-    if ! printf '%s' "$response" | jq -e '.categories | type == "array"' >/dev/null 2>&1; then
-        echo "Unexpected categories API response (not valid JSON category data)." >&2
         return 1
     fi
 

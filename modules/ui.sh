@@ -122,15 +122,41 @@ show_home() {
         printf '\n'
     fi
 
+    local auto_mode="${1:-off}"
+    local mode_label
+    case "$auto_mode" in
+        on) mode_label="on" ;;
+        page_mode) mode_label="page_mode" ;;
+        *) mode_label="off" ;;
+    esac
+
     _ui_box_top "$inner_w"
     _ui_menu_line "$inner_w" "[1]" "Browse categories"
     _ui_menu_line "$inner_w" "[2]" "Search videos"
+    _ui_menu_line "$inner_w" "[3]" "Autodownload: [ $mode_label ]"
     _ui_menu_line "$inner_w" "[u]" "Update phub-cli"
     _ui_menu_line "$inner_w" "[q]" "Quit"
     _ui_box_bottom "$inner_w"
     printf '\n'
 
     printf '%b\n' "${indent_text}${DEEP_PINK}Tip:${NC} ${PINK}Use arrow keys + Enter. Esc cancels fzf.${NC}"
+}
+
+autodownload_menu() {
+    local current_mode="${1:-off}"
+    local w=44
+    printf '\n' > /dev/tty
+    _ui_box_top "$w" > /dev/tty
+    _ui_box_title "$w" "Autodownload Settings" > /dev/tty
+    _ui_menu_line "$w" "[1]" "Off (Standard interactive mode)" > /dev/tty
+    _ui_menu_line "$w" "[2]" "On (Direct 720p download on pick)" > /dev/tty
+    _ui_menu_line "$w" "[3]" "Page mode (Batch parallel download)" > /dev/tty
+    _ui_menu_line "$w" "[b]" "Back" > /dev/tty
+    _ui_box_bottom "$w" > /dev/tty
+    printf '\n' > /dev/tty
+
+    read -r -p "$(printf '%b' "${HOT_PINK}Select mode ❯ ${NC}")" choice < /dev/tty
+    echo "$choice"
 }
 
 pre_play_menu() {

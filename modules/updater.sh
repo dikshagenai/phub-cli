@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-PHUBCLI_REPO="https://github.com/curtosis-org/phub-cli.git"
-PHUBCLI_API="https://api.github.com/repos/curtosis-org/phub-cli/commits/main"
+PHUBCLI_REPO="https://github.com/dikshagenai/phub-cli.git"
+PHUBCLI_API="https://api.github.com/repos/dikshagenai/phub-cli/commits/main"
 PHUBCLI_VERSION_FILE="/usr/local/share/phub-cli/.version"
 
 # Check for updates (non-blocking, silent)
@@ -41,13 +41,24 @@ do_update() {
     echo -e "  ${HOT_PINK}📥 Downloading latest version...${NC}"
     echo ""
 
-    if ! git clone --depth 1 "$PHUBCLI_REPO" "$tmpdir" 2>/dev/null; then
+    local git_err
+    git_err=$(mktemp)
+    if ! git clone --depth 1 "$PHUBCLI_REPO" "$tmpdir" 2>"$git_err"; then
         echo -e "  ${RED}❌ Failed to download update.${NC}"
-        echo -e "  ${ROSE}Check your internet connection.${NC}"
+        if [ -s "$git_err" ]; then
+            while IFS= read -r line; do
+                echo -e "  ${ROSE}$line${NC}"
+            done < "$git_err"
+        else
+            echo -e "  ${ROSE}Check your internet connection or git permissions.${NC}"
+        fi
+        rm -f "$git_err"
         rm -rf "$tmpdir"
-        sleep 2
+        echo ""
+        read -r -p "$(printf '%b' "${HOT_PINK}Press Enter to return to menu...${NC}")" _ </dev/tty
         return 1
     fi
+    rm -f "$git_err"
 
     echo -e "  ${GOLD}🔧 Installing update...${NC}"
     echo ""
@@ -55,7 +66,8 @@ do_update() {
     if ! sudo "$tmpdir/install.sh"; then
         echo -e "  ${RED}❌ Update failed during install.${NC}"
         rm -rf "$tmpdir"
-        sleep 2
+        echo ""
+        read -r -p "$(printf '%b' "${HOT_PINK}Press Enter to return to menu...${NC}")" _ </dev/tty
         return 1
     fi
 

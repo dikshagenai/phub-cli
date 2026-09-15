@@ -21,7 +21,7 @@ spinner() {
 
 play_video() {
     viewkey="$1"
-    page_url="https://www.pornhub.com/view_video.php?viewkey=$viewkey"
+    page_url="https://www.pornhub.org/view_video.php?viewkey=$viewkey"
 
     start_time=$(date +%s)
 
@@ -60,22 +60,46 @@ play_video() {
     sleep 0.6
 
     #play — let mpv use yt-dlp directly (avoids token expiration)
+    local mpv_log
+    mpv_log=$(mktemp)
+
     mpv \
-        --really-quiet \
+        --msg-level=all=warn,ytdl=error \
         --profile=fast \
         --hwdec=auto \
         --cache=yes \
         --cache-secs=10 \
         --ytdl-format="bestvideo[height<=1080]+bestaudio/best" \
         --ytdl-raw-options="cookies-from-browser=firefox" \
-        "$page_url"
+        "$page_url" 2>"$mpv_log"
+    local mpv_status=$?
 
     end_time=$(date +%s)
     duration=$((end_time - start_time))
 
     #failure
-    [ "$duration" -lt 5 ] && return 1
+    if [ "$mpv_status" -ne 0 ] && [ "$duration" -lt 5 ]; then
+        echo "" > /dev/tty
+        echo -e "  ${RED}❌ Playback failed:${NC}" > /dev/tty
+        local found_err=0
+        if [ -s "$mpv_log" ]; then
+            while IFS= read -r line; do
+                if echo "$line" | grep -Eiq "error|failed|unavailable|denied|forbidden"; then
+                    echo -e "  ${ROSE}$line${NC}" > /dev/tty
+                    found_err=1
+                fi
+            done < "$mpv_log"
+        fi
+        if [ "$found_err" -eq 0 ]; then
+            echo -e "  ${ROSE}Video stream is unavailable or connection was reset.${NC}" > /dev/tty
+        fi
+        echo "" > /dev/tty
+        read -r -p "  Press Enter to continue..." _ </dev/tty
+        rm -f "$mpv_log"
+        return 1
+    fi
 
+    rm -f "$mpv_log"
     return 0
 }
 
@@ -96,84 +120,142 @@ download_spinner() {
 download_video() {
     viewkey="$1"
     quality="$2"
-    page_url="https://www.pornhub.com/view_video.php?viewkey=$viewkey"
+    page_url="https://www.pornhub.org/view_video.php?viewkey=$viewkey"
     download_dir="$HOME/Videos/phub-cli"
 
     # Create download directory if it doesn't exist
     mkdir -p "$download_dir"
 
-    # Set format based on quality selection
+    # Set format based on quality selection (prioritize direct https mp4 for reliability and resumability)
     case "$quality" in
         1)
-            format="bestvideo+bestaudio/best"
+            format="best[protocol=https]/best[protocol^=http]/bestvideo+bestaudio/best"
             quality_name="best"
             ;;
         2)
-            format="bestvideo[height<=720]+bestaudio/best[height<=720]"
+            format="best[height<=720][protocol=https]/best[height<=720]/bestvideo[height<=720]+bestaudio/best"
             quality_name="720p"
             ;;
         3)
-            format="bestvideo[height<=480]+bestaudio/best[height<=480]"
+            format="best[height<=480][protocol=https]/best[height<=480]/bestvideo[height<=480]+bestaudio/best"
             quality_name="480p"
             ;;
         4)
-            format="bestvideo[height<=360]+bestaudio/best[height<=360]"
+            format="best[height<=360][protocol=https]/best[height<=360]/bestvideo[height<=360]+bestaudio/best"
             quality_name="360p"
             ;;
         *)
-            format="bestvideo+bestaudio/best"
+            format="best[protocol=https]/best[protocol^=http]/bestvideo+bestaudio/best"
             quality_name="best"
             ;;
     esac
 
-    clear
+    while true; do
+        clear
 
-    messages=(
-        "📥 Initiating download sequence..."
-        "💾 Preparing storage containers..."
-        "🔒 Securing the goods..."
-        "📦 Packaging premium content..."
-        "🚀 Launching download protocol..."
-        "💿 Writing to disk with passion..."
-    )
-    pick1=${messages[RANDOM % ${#messages[@]}]}
-    pick2=${messages[RANDOM % ${#messages[@]}]}
+        messages=(
+            "📥 Initiating download sequence..."
+            "💾 Preparing storage containers..."
+            "🔒 Securing the goods..."
+            "📦 Packaging premium content..."
+            "🚀 Launching download protocol..."
+            "💿 Writing to disk with passion..."
+        )
+        pick1=${messages[RANDOM % ${#messages[@]}]}
+        pick2=${messages[RANDOM % ${#messages[@]}]}
 
-    echo "" > /dev/tty
-    echo -e "  ${HOT_PINK}$pick1${NC}" > /dev/tty
-    sleep 0.3
-    echo -e "  ${PINK}$pick2${NC}" > /dev/tty
-    echo "" > /dev/tty
-    echo -e "  ${GOLD}📺 Quality: $quality_name${NC}" > /dev/tty
-    echo -e "  ${DEEP_PINK}📁 Destination: $download_dir${NC}" > /dev/tty
-    echo "" > /dev/tty
-
-    # Download with yt-dlp
-    yt-dlp \
-        --cookies-from-browser=firefox \
-        -f "$format" \
-        -o "$download_dir/%(title)s.%(ext)s" \
-        --no-playlist \
-        --progress \
-        "$page_url" 2>&1 | tee /tmp/phub_download.$$ > /dev/tty
-
-    download_status=${PIPESTATUS[0]}
-
-    if [ "$download_status" -eq 0 ]; then
         echo "" > /dev/tty
-        echo -e "  ${GOLD}✅ Download complete!${NC}" > /dev/tty
-        echo -e "  ${DEEP_PINK}📁 Saved to: $download_dir${NC}" > /dev/tty
-        sleep 1
-        return 0
-    else
+        echo -e "  ${HOT_PINK}$pick1${NC}" > /dev/tty
+        sleep 0.3
+        echo -e "  ${PINK}$pick2${NC}" > /dev/tty
         echo "" > /dev/tty
-        echo -e "  ${RED}❌ Download failed.${NC}" > /dev/tty
-        echo -e "  ${ROSE}😞 Video might be unavailable or restricted.${NC}" > /dev/tty
-        sleep 2
-        return 1
-    fi
+        echo -e "  ${GOLD}📺 Quality: $quality_name${NC}" > /dev/tty
+        echo -e "  ${DEEP_PINK}📁 Destination: $download_dir${NC}" > /dev/tty
+        echo "" > /dev/tty
 
-    rm -f /tmp/phub_download.$$
+        local dl_log
+        dl_log=$(mktemp)
+
+        local aria2c_cmd=""
+        if command -v aria2c >/dev/null 2>&1; then
+            aria2c_cmd="aria2c"
+        elif [ -x "$HOME/.local/bin/aria2c" ]; then
+            aria2c_cmd="$HOME/.local/bin/aria2c"
+        elif [ -x "$HOME/.config/phub-cli/bin/aria2c" ]; then
+            aria2c_cmd="$HOME/.config/phub-cli/bin/aria2c"
+        fi
+
+        local ytdl_opts=(
+            --no-playlist
+            --progress
+            --continue
+            --concurrent-fragments 4
+            --buffer-size 1024K
+            --retries 10
+            --fragment-retries 10
+            --file-access-retries 5
+            --no-mtime
+        )
+
+        if [ -n "$aria2c_cmd" ]; then
+            ytdl_opts+=(
+                --downloader "$aria2c_cmd"
+                --downloader-args "aria2c:--summary-interval=1 -x 16 -s 16 -k 1M -j 16"
+            )
+        fi
+
+        # Download with yt-dlp (attempt with firefox cookies first)
+        yt-dlp \
+            --cookies-from-browser=firefox \
+            -f "$format" \
+            -o "$download_dir/%(title)s.%(ext)s" \
+            "${ytdl_opts[@]}" \
+            "$page_url" 2>&1 | tee "$dl_log" > /dev/tty
+
+        download_status=${PIPESTATUS[0]}
+
+        # If failed due to locked or missing cookies, fallback and download without cookies
+        if [ "$download_status" -ne 0 ] && grep -Eiq "cookie|database is locked|sqlite3\.OperationalError" "$dl_log"; then
+            echo "" > /dev/tty
+            echo -e "  ${YELLOW}⚠️  Browser cookies locked/unavailable. Retrying without cookies...${NC}" > /dev/tty
+            > "$dl_log"
+            yt-dlp \
+                -f "$format" \
+                -o "$download_dir/%(title)s.%(ext)s" \
+                "${ytdl_opts[@]}" \
+                "$page_url" 2>&1 | tee "$dl_log" > /dev/tty
+            download_status=${PIPESTATUS[0]}
+        fi
+
+        if [ "$download_status" -eq 0 ]; then
+            echo "" > /dev/tty
+            echo -e "  ${GOLD}✅ Download complete!${NC}" > /dev/tty
+            echo -e "  ${DEEP_PINK}📁 Saved to: $download_dir${NC}" > /dev/tty
+            sleep 1
+            rm -f "$dl_log"
+            return 0
+        else
+            echo "" > /dev/tty
+            echo -e "  ${RED}❌ Download failed.${NC}" > /dev/tty
+            if [ -s "$dl_log" ]; then
+                grep -Ei "error:|failed|unavailable|denied|forbidden" "$dl_log" | tail -n 3 | while IFS= read -r line; do
+                    echo -e "  ${ROSE}$line${NC}" > /dev/tty
+                done
+            fi
+            echo -e "  ${ROSE}😞 Video might be unavailable, restricted, or network connection dropped.${NC}" > /dev/tty
+            echo "" > /dev/tty
+            read -r -p "  Retry download? (y/n, default: n): " retry_dl </dev/tty
+            rm -f "$dl_log"
+            case "$retry_dl" in
+                y|Y)
+                    continue
+                    ;;
+                *)
+                    return 1
+                    ;;
+            esac
+        fi
+    done
 }
 
 open_in_browser() {
@@ -183,16 +265,31 @@ open_in_browser() {
     echo "" > /dev/tty
     echo -e "  ${HOT_PINK}🌐 Opening in browser...${NC}" > /dev/tty
 
-    if command -v xdg-open >/dev/null; then
+    if command -v xdg-open >/dev/null 2>&1; then
         xdg-open "$page_url" 2>/dev/null &
-    elif command -v open >/dev/null; then
+    elif command -v open >/dev/null 2>&1; then
         open "$page_url" 2>/dev/null &
     else
-        echo -e "  ${RED}❌ No browser opener found${NC}" > /dev/tty
-        sleep 2
+        echo -e "  ${RED}❌ No browser opener found (xdg-open / open)${NC}" > /dev/tty
+        read -r -p "  Press Enter to continue..." _ </dev/tty
         return 1
     fi
 
     sleep 1
-    return 0
+}
+
+batch_download_videos() {
+    local list_file="$1"
+    local quality="${2:-720p}"
+    local concurrency="${3:-5}"
+    local download_dir="$HOME/Videos/phub-cli"
+
+    mkdir -p "$download_dir"
+
+    python3 "$DIR/modules/downloader.py" \
+        --list "$list_file" \
+        --output-dir "$download_dir" \
+        --quality "$quality" \
+        --concurrency "$concurrency" \
+        --fragments 4
 }
