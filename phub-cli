@@ -2,6 +2,11 @@
 
 exec </dev/tty
 
+# Ensure local user bin is in PATH for tools like aria2c
+if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+    export PATH="$HOME/.local/bin:$PATH"
+fi
+
 # Resolve script directory (handles symlinks)
 SCRIPT="$0"
 while [ -L "$SCRIPT" ]; do
@@ -16,9 +21,38 @@ source "$DIR/modules/player.sh"
 source "$DIR/modules/ui.sh"
 source "$DIR/modules/updater.sh"
 
-command -v fzf >/dev/null || { echo "fzf not installed"; exit 1; }
-command -v mpv >/dev/null || { echo "mpv not installed"; exit 1; }
-command -v yt-dlp >/dev/null || { echo "yt-dlp not installed"; exit 1; }
+check_dependencies() {
+    local missing=()
+    local deps=(fzf mpv yt-dlp curl jq python3)
+    for d in "${deps[@]}"; do
+        if ! command -v "$d" >/dev/null 2>&1; then
+            missing+=("$d")
+        fi
+    done
+
+    if [ ${#missing[@]} -gt 0 ]; then
+        echo ""
+        echo "❌ Missing required dependencies: ${missing[*]}"
+        echo "   Please install them to use phub-cli."
+        exit 1
+    fi
+
+    local py_missing=()
+    if ! python3 -c "import requests" >/dev/null 2>&1; then
+        py_missing+=("requests")
+    fi
+    if ! python3 -c "import bs4" >/dev/null 2>&1; then
+        py_missing+=("beautifulsoup4")
+    fi
+
+    if [ ${#py_missing[@]} -gt 0 ]; then
+        echo ""
+        echo "❌ Missing required Python packages: ${py_missing[*]}"
+        echo "   Install them using: pip install ${py_missing[*]}"
+        exit 1
+    fi
+}
+check_dependencies
 
 PHUBCLI_FZF_THEME=${PHUBCLI_FZF_THEME:-1}
 PHUBCLI_FZF_OPTS=()
@@ -30,6 +64,43 @@ if [ "${PHUBCLI_FZF_THEME}" = "1" ]; then
         --color='fg:#c0c0c0,bg:-1,hl:#ff005f,fg+:#ffffff,bg+:-1,hl+:#ff5fd7,info:#ffaf00,prompt:#ff5fd7,pointer:#ff005f,marker:#ff5fd7,spinner:#ffaf00,header:#ff5fd7,border:#ff005f'
     )
 fi
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/phub-cli"
+CONFIG_FILE="$CONFIG_DIR/config"
+
+get_autodownload_mode() {
+    # Check environment variable first
+    if [ -n "$PHUBCLI_AUTODOWNLOAD" ]; then
+        case "$PHUBCLI_AUTODOWNLOAD" in
+            1|on|ON) echo "on"; return ;;
+            page|pages|page_mode|PAGE_MODE) echo "page_mode"; return ;;
+            0|off|OFF|*) echo "off"; return ;;
+        esac
+    fi
+
+    # Check config file
+    if [ -f "$CONFIG_FILE" ]; then
+        local mode
+        mode=$(grep -E "^AUTODOWNLOAD_MODE=" "$CONFIG_FILE" 2>/dev/null | cut -d'=' -f2 | tr -d ' "\r\n')
+        case "$mode" in
+            on) echo "on"; return ;;
+            page_mode) echo "page_mode"; return ;;
+            *) echo "off"; return ;;
+        esac
+    fi
+
+    echo "off"
+}
+
+set_autodownload_mode() {
+    local mode="$1"
+    mkdir -p "$CONFIG_DIR" 2>/dev/null
+    if [ -f "$CONFIG_FILE" ] && grep -q "^AUTODOWNLOAD_MODE=" "$CONFIG_FILE" 2>/dev/null; then
+        sed -i "s/^AUTODOWNLOAD_MODE=.*/AUTODOWNLOAD_MODE=$mode/" "$CONFIG_FILE"
+    else
+        echo "AUTODOWNLOAD_MODE=$mode" >> "$CONFIG_FILE"
+    fi
+}
 
 # Check for updates in background
 check_for_update &
@@ -43,7 +114,8 @@ while true; do
     fi
 
     clear
-    show_home
+    auto_mode=$(get_autodownload_mode)
+    show_home "$auto_mode"
 
     read -r -p "Select option: " choice </dev/tty
 
@@ -51,10 +123,32 @@ while true; do
 
     #categ
     1)
-        if ! categories=$(get_categories); then
-            read -r -p "Press Enter to return to menu..." _ </dev/tty
-            continue
-        fi
+        # Fetch categories (with retry)
+        while true; do
+            cat_err_tmp=$(mktemp)
+            if categories=$(get_categories 2>"$cat_err_tmp") && [ -n "$categories" ]; then
+                rm -f "$cat_err_tmp"
+                break
+            fi
+            cat_err=$(cat "$cat_err_tmp" 2>/dev/null)
+            rm -f "$cat_err_tmp"
+
+            echo "" > /dev/tty
+            echo -e "  ${RED}❌ Failed to fetch categories:${NC}" > /dev/tty
+            [ -n "$cat_err" ] && echo -e "  ${ROSE}${cat_err}${NC}" > /dev/tty
+            echo "" > /dev/tty
+            read -r -p "  Retry fetching categories? (y/n, default: y): " retry_cat </dev/tty
+            case "$retry_cat" in
+                n|N|q|Q)
+                    break 2
+                    ;;
+                *)
+                    continue
+                    ;;
+            esac
+        done
+
+        [ -z "$categories" ] && continue
 
         category=$(printf '%s\n' "$categories" | fzf "${PHUBCLI_FZF_OPTS[@]}" \
             --prompt="Category ❯ " \
@@ -68,137 +162,109 @@ while true; do
         [ -z "$category" ] && continue
 
         cid=$(echo "$category" | awk -F'|' '{print $1}')
-        page=1
+        cname=$(echo "$category" | awk -F'|' '{print $2}')
 
-        #res
-        while true; do
-            # Build list with pagination
-            video_list=$("$DIR/modules/videos.py" "$cid" "$page")
+        auto_mode=$(get_autodownload_mode)
 
-            # Add navigation options
-            nav_options=""
-            [ "$page" -gt 1 ] && nav_options="PREV|<<< Previous page\n"
-            nav_options="${nav_options}NEXT|>>> Next page"
+        # Batch page download mode for category
+        if [ "$auto_mode" = "page_mode" ]; then
+            clear
+            echo "" > /dev/tty
+            echo -e "  ${HOT_PINK}📂 Category:${NC} ${GOLD}$cname${NC}" > /dev/tty
+            echo -e "  ${DEEP_PINK}⚡ Mode:${NC} ${PINK}Page Mode (Batch Parallel Download)${NC}" > /dev/tty
+            echo "" > /dev/tty
 
-            video=$(printf "%s\n%b" "$video_list" "$nav_options" | fzf "${PHUBCLI_FZF_OPTS[@]}" \
-                --prompt="Video (page $page) ❯ " \
-                --height=100% \
-                --border \
-                --layout=reverse \
-                --cycle \
-                --delimiter="|" \
-                --with-nth=2 \
-                --preview='echo {} | cut -d"|" -f2' \
-                --preview-window=down:4:wrap)
+            read -r -p "$(printf '%b' "  ${HOT_PINK}Download videos up to how many pages? (default: 1): ${NC}")" page_count < /dev/tty
+            page_count=$(echo "$page_count" | xargs)
+            if [ -z "$page_count" ] || ! [[ "$page_count" =~ ^[0-9]+$ ]] || [ "$page_count" -lt 1 ]; then
+                page_count=1
+            fi
+            if [ "$page_count" -gt 50 ]; then
+                page_count=50
+            fi
 
-            [ -z "$video" ] && break
+            echo "" > /dev/tty
+            all_videos_tmp=$(mktemp)
+            for ((p=1; p<=page_count; p++)); do
+                printf "  ${GOLD}🔍 Fetching page %d/%d...${NC} " "$p" "$page_count" > /dev/tty
+                p_err_tmp=$(mktemp)
+                p_list=$("$DIR/modules/videos.py" "$cid" "$p" 2>"$p_err_tmp")
+                p_exit=$?
+                rm -f "$p_err_tmp"
+                if [ "$p_exit" -ne 0 ] || [ -z "$p_list" ]; then
+                    printf "${ROSE}(no more videos)${NC}\n" > /dev/tty
+                    break
+                fi
+                count=$(echo "$p_list" | grep -c '|')
+                printf "${PINK}(%d videos found)${NC}\n" "$count" > /dev/tty
+                echo "$p_list" >> "$all_videos_tmp"
+            done
 
-            viewkey=$(echo "$video" | awk -F'|' '{print $1}')
+            unique_videos_tmp=$(mktemp)
+            awk -F'|' '!seen[$1]++' "$all_videos_tmp" > "$unique_videos_tmp"
+            total_vids=$(wc -l < "$unique_videos_tmp" | xargs)
+            rm -f "$all_videos_tmp"
 
-            # Handle pagination
-            if [ "$viewkey" = "NEXT" ]; then
-                ((page++))
-                continue
-            elif [ "$viewkey" = "PREV" ]; then
-                ((page--))
-                [ "$page" -lt 1 ] && page=1
+            if [ -z "$total_vids" ] || [ "$total_vids" -eq 0 ]; then
+                echo "" > /dev/tty
+                echo -e "  ${GOLD}ℹ No videos found in this category to download.${NC}" > /dev/tty
+                rm -f "$unique_videos_tmp"
+                echo "" > /dev/tty
+                read -r -p "  Press Enter to return..." _ </dev/tty
                 continue
             fi
 
-            #pre-play menu
+            echo "" > /dev/tty
+            echo -e "  ${GOLD}📋 Total videos found:${NC} ${BOLD}$total_vids${NC}" > /dev/tty
+            echo -e "  ${DEEP_PINK}📁 Destination:${NC} $HOME/Videos/phub-cli" > /dev/tty
+            echo -e "  ${PINK}📺 Quality:${NC} 720p" > /dev/tty
+            echo -e "  ${HOT_PINK}⚡ Parallel downloads:${NC} 5 concurrent" > /dev/tty
+            echo "" > /dev/tty
+            read -r -p "$(printf '%b' "  ${HOT_PINK}Continue downloading? (Y/n, default: y): ${NC}")" confirm_dl < /dev/tty
+            case "$confirm_dl" in
+                n|N|q|Q)
+                    rm -f "$unique_videos_tmp"
+                    continue
+                    ;;
+                *)
+                    batch_download_videos "$unique_videos_tmp" "720p"
+                    rm -f "$unique_videos_tmp"
+                    echo "" > /dev/tty
+                    read -r -p "$(printf '%b' "  ${HOT_PINK}Press Enter to return to menu...${NC}")" _ < /dev/tty
+                    continue
+                    ;;
+            esac
+        fi
+
+        page=1
+
+        # Pagination loop
+        while true; do
+            # Fetch videos for current page (with retry)
+            video_list=""
             while true; do
-                clear
-                pre_action=$(pre_play_menu)
+                video_err_tmp=$(mktemp)
+                video_list=$("$DIR/modules/videos.py" "$cid" "$page" 2>"$video_err_tmp")
+                video_exit=$?
+                video_err=$(cat "$video_err_tmp" 2>/dev/null)
+                rm -f "$video_err_tmp"
 
-                case "$pre_action" in
-                    1)
-                        # Watch video
-                        while true; do
-                            if ! play_video "$viewkey"; then
-                                echo "❌ Video unavailable"
-                                sleep 1
-                                break
-                            fi
+                if [ "$video_exit" -eq 0 ]; then
+                    break
+                fi
 
-                            clear
-                            action=$(post_play_menu)
-
-                            case "$action" in
-                                1)
-                                    continue
-                                    ;;
-                                2)
-                                    break
-                                    ;;
-                                3)
-                                    nav="home"
-                                    break
-                                    ;;
-                                q|Q)
-                                    clear
-                                    exit 0
-                                    ;;
-                                *)
-                                    continue
-                                    ;;
-                            esac
-                        done
-                        [ "$nav" = "home" ] && break
-                        break
-                        ;;
-                    2)
-                        # Download video
-                        while true; do
-                            clear
-                            quality=$(quality_menu)
-
-                            case "$quality" in
-                                1|2|3|4)
-                                    if download_video "$viewkey" "$quality"; then
-                                        clear
-                                        dl_action=$(post_download_menu)
-
-                                        case "$dl_action" in
-                                            1)
-                                                continue
-                                                ;;
-                                            2)
-                                                break
-                                                ;;
-                                            3)
-                                                nav="home"
-                                                break
-                                                ;;
-                                            q|Q)
-                                                clear
-                                                exit 0
-                                                ;;
-                                            *)
-                                                continue
-                                                ;;
-                                        esac
-                                    else
-                                        break
-                                    fi
-                                    ;;
-                                b|B)
-                                    break
-                                    ;;
-                                *)
-                                    continue
-                                    ;;
-                            esac
-                        done
-                        [ "$nav" = "home" ] && break
-                        break
-                        ;;
-                    3)
-                        # Open in browser
-                        open_in_browser "$viewkey"
-                        continue
-                        ;;
-                    b|B)
-                        break
+                echo "" > /dev/tty
+                echo -e "  ${RED}❌ Error loading category videos:${NC}" > /dev/tty
+                if [ -n "$video_err" ]; then
+                    echo -e "  ${ROSE}${video_err}${NC}" > /dev/tty
+                else
+                    echo -e "  ${ROSE}Failed to retrieve video list.${NC}" > /dev/tty
+                fi
+                echo "" > /dev/tty
+                read -r -p "  Retry loading videos? (y/n, default: y): " retry_vid </dev/tty
+                case "$retry_vid" in
+                    n|N|q|Q)
+                        break 2
                         ;;
                     *)
                         continue
@@ -206,148 +272,271 @@ while true; do
                 esac
             done
 
-            #back
-            if [ "$nav" = "home" ]; then
-                nav=""
-                break
+            if [ -z "$video_list" ]; then
+                echo "" > /dev/tty
+                if [ "$page" -eq 1 ]; then
+                    echo -e "  ${GOLD}ℹ No videos found in this category.${NC}" > /dev/tty
+                    echo "" > /dev/tty
+                    read -r -p "  Press Enter to return..." _ </dev/tty
+                    break
+                else
+                    echo -e "  ${GOLD}ℹ No more videos found on page $page.${NC}" > /dev/tty
+                    echo "" > /dev/tty
+                    read -r -p "  Press Enter to go to previous page..." _ </dev/tty
+                    ((page--))
+                    [ "$page" -lt 1 ] && page=1
+                    continue
+                fi
             fi
+
+            # Add navigation options
+            nav_options=""
+            [ "$page" -gt 1 ] && nav_options="PREV|<<< Previous page\n"
+            nav_options="${nav_options}NEXT|>>> Next page"
+
+            # Results selection loop (returns to the same list without re-fetching!)
+            while true; do
+                video=$(printf "%s\n%b" "$video_list" "$nav_options" | fzf "${PHUBCLI_FZF_OPTS[@]}" \
+                    --prompt="Video (page $page) ❯ " \
+                    --height=100% \
+                    --border \
+                    --layout=reverse \
+                    --cycle \
+                    --delimiter="|" \
+                    --with-nth=2 \
+                    --preview='echo {} | cut -d"|" -f2' \
+                    --preview-window=down:4:wrap)
+
+                [ -z "$video" ] && break 2 # Return to main menu
+
+                viewkey=$(echo "$video" | awk -F'|' '{print $1}')
+
+                # Handle pagination
+                if [ "$viewkey" = "NEXT" ]; then
+                    ((page++))
+                    break # break results loop to fetch next page
+                elif [ "$viewkey" = "PREV" ]; then
+                    ((page--))
+                    [ "$page" -lt 1 ] && page=1
+                    break # break results loop to fetch prev page
+                fi
+
+                # Direct 720p autodownload when mode is on
+                if [ "$auto_mode" = "on" ]; then
+                    download_video "$viewkey" 2
+                    sleep 1
+                    continue
+                fi
+
+                # Pre-play menu loop
+                while true; do
+                    clear
+                    pre_action=$(pre_play_menu)
+
+                    case "$pre_action" in
+                        1)
+                            # Watch video
+                            while true; do
+                                play_video "$viewkey"
+                                clear
+                                action=$(post_play_menu)
+
+                                case "$action" in
+                                    1)
+                                        continue
+                                        ;;
+                                    2)
+                                        break 2 # Back to results list
+                                        ;;
+                                    3)
+                                        nav="home"
+                                        break 2 # Back to home
+                                        ;;
+                                    q|Q)
+                                        clear
+                                        exit 0
+                                        ;;
+                                    *)
+                                        continue
+                                        ;;
+                                esac
+                            done
+                            break
+                            ;;
+                        2)
+                            # Download video
+                            while true; do
+                                clear
+                                quality=$(quality_menu)
+
+                                case "$quality" in
+                                    1|2|3|4)
+                                        if download_video "$viewkey" "$quality"; then
+                                            clear
+                                            dl_action=$(post_download_menu)
+
+                                            case "$dl_action" in
+                                                1)
+                                                    continue
+                                                    ;;
+                                                2)
+                                                    break 2 # Back to results
+                                                    ;;
+                                                3)
+                                                    nav="home"
+                                                    break 2 # Back to home
+                                                    ;;
+                                                q|Q)
+                                                    clear
+                                                    exit 0
+                                                    ;;
+                                                *)
+                                                    continue
+                                                    ;;
+                                            esac
+                                        else
+                                            break
+                                        fi
+                                        ;;
+                                    b|B)
+                                        break
+                                        ;;
+                                    *)
+                                        continue
+                                        ;;
+                                esac
+                            done
+                            continue
+                            ;;
+                        3)
+                            # Open in browser
+                            open_in_browser "$viewkey"
+                            continue
+                            ;;
+                        b|B)
+                            break # Back to results list
+                            ;;
+                        *)
+                            continue
+                            ;;
+                    esac
+                done
+
+                if [ "$nav" = "home" ]; then
+                    nav=""
+                    break 2 # return to main menu
+                fi
+            done
         done
         ;;
 
     #Search
     2)
         read -r -p "Search query: " query </dev/tty
+        query=$(echo "$query" | xargs)
         [ -z "$query" ] && continue
-        page=1
 
-        while true; do
-            # Build list with pagination
-            video_list=$("$DIR/modules/search.py" "$query" "$page")
+        auto_mode=$(get_autodownload_mode)
 
-            # Add navigation options
-            nav_options=""
-            [ "$page" -gt 1 ] && nav_options="PREV|<<< Previous page\n"
-            nav_options="${nav_options}NEXT|>>> Next page"
+        # Batch page download mode for search
+        if [ "$auto_mode" = "page_mode" ]; then
+            clear
+            echo "" > /dev/tty
+            echo -e "  ${HOT_PINK}🔍 Search query:${NC} ${GOLD}$query${NC}" > /dev/tty
+            echo -e "  ${DEEP_PINK}⚡ Mode:${NC} ${PINK}Page Mode (Batch Parallel Download)${NC}" > /dev/tty
+            echo "" > /dev/tty
 
-            video=$(printf "%s\n%b" "$video_list" "$nav_options" | fzf "${PHUBCLI_FZF_OPTS[@]}" \
-                --prompt="Search (page $page) ❯ " \
-                --height=100% \
-                --border \
-                --layout=reverse \
-                --cycle \
-                --delimiter="|" \
-                --with-nth=2 \
-                --preview='echo {} | cut -d"|" -f2' \
-                --preview-window=down:4:wrap)
+            read -r -p "$(printf '%b' "  ${HOT_PINK}Download videos up to how many pages? (default: 1): ${NC}")" page_count < /dev/tty
+            page_count=$(echo "$page_count" | xargs)
+            if [ -z "$page_count" ] || ! [[ "$page_count" =~ ^[0-9]+$ ]] || [ "$page_count" -lt 1 ]; then
+                page_count=1
+            fi
+            if [ "$page_count" -gt 50 ]; then
+                page_count=50
+            fi
 
-            [ -z "$video" ] && break
+            echo "" > /dev/tty
+            all_videos_tmp=$(mktemp)
+            for ((p=1; p<=page_count; p++)); do
+                printf "  ${GOLD}🔍 Fetching page %d/%d...${NC} " "$p" "$page_count" > /dev/tty
+                p_err_tmp=$(mktemp)
+                p_list=$("$DIR/modules/search.py" "$query" "$p" 2>"$p_err_tmp")
+                p_exit=$?
+                rm -f "$p_err_tmp"
+                if [ "$p_exit" -ne 0 ] || [ -z "$p_list" ]; then
+                    printf "${ROSE}(no more videos)${NC}\n" > /dev/tty
+                    break
+                fi
+                count=$(echo "$p_list" | grep -c '|')
+                printf "${PINK}(%d videos found)${NC}\n" "$count" > /dev/tty
+                echo "$p_list" >> "$all_videos_tmp"
+            done
 
-            viewkey=$(echo "$video" | awk -F'|' '{print $1}')
+            unique_videos_tmp=$(mktemp)
+            awk -F'|' '!seen[$1]++' "$all_videos_tmp" > "$unique_videos_tmp"
+            total_vids=$(wc -l < "$unique_videos_tmp" | xargs)
+            rm -f "$all_videos_tmp"
 
-            # Handle pagination
-            if [ "$viewkey" = "NEXT" ]; then
-                ((page++))
-                continue
-            elif [ "$viewkey" = "PREV" ]; then
-                ((page--))
-                [ "$page" -lt 1 ] && page=1
+            if [ -z "$total_vids" ] || [ "$total_vids" -eq 0 ]; then
+                echo "" > /dev/tty
+                echo -e "  ${GOLD}ℹ No videos found matching '${query}' to download.${NC}" > /dev/tty
+                rm -f "$unique_videos_tmp"
+                echo "" > /dev/tty
+                read -r -p "  Press Enter to return..." _ </dev/tty
                 continue
             fi
 
-            #pre-play menu
+            echo "" > /dev/tty
+            echo -e "  ${GOLD}📋 Total videos found:${NC} ${BOLD}$total_vids${NC}" > /dev/tty
+            echo -e "  ${DEEP_PINK}📁 Destination:${NC} $HOME/Videos/phub-cli" > /dev/tty
+            echo -e "  ${PINK}📺 Quality:${NC} 720p" > /dev/tty
+            echo -e "  ${HOT_PINK}⚡ Parallel downloads:${NC} 5 concurrent" > /dev/tty
+            echo "" > /dev/tty
+            read -r -p "$(printf '%b' "  ${HOT_PINK}Continue downloading? (Y/n, default: y): ${NC}")" confirm_dl < /dev/tty
+            case "$confirm_dl" in
+                n|N|q|Q)
+                    rm -f "$unique_videos_tmp"
+                    continue
+                    ;;
+                *)
+                    batch_download_videos "$unique_videos_tmp" "720p"
+                    rm -f "$unique_videos_tmp"
+                    echo "" > /dev/tty
+                    read -r -p "$(printf '%b' "  ${HOT_PINK}Press Enter to return to menu...${NC}")" _ < /dev/tty
+                    continue
+                    ;;
+            esac
+        fi
+
+        page=1
+
+        # Pagination loop
+        while true; do
+            # Fetch search results for current page (with retry)
+            video_list=""
             while true; do
-                clear
-                pre_action=$(pre_play_menu)
+                search_err_tmp=$(mktemp)
+                video_list=$("$DIR/modules/search.py" "$query" "$page" 2>"$search_err_tmp")
+                search_exit=$?
+                search_err=$(cat "$search_err_tmp" 2>/dev/null)
+                rm -f "$search_err_tmp"
 
-                case "$pre_action" in
-                    1)
-                        # Watch video
-                        while true; do
-                            if ! play_video "$viewkey"; then
-                                echo "❌ Video unavailable"
-                                sleep 1
-                                break
-                            fi
+                if [ "$search_exit" -eq 0 ]; then
+                    break
+                fi
 
-                            clear
-                            action=$(post_play_menu)
-
-                            case "$action" in
-                                1)
-                                    continue
-                                    ;;
-                                2)
-                                    break
-                                    ;;
-                                3)
-                                    nav="home"
-                                    break
-                                    ;;
-                                q|Q)
-                                    clear
-                                    exit 0
-                                    ;;
-                                *)
-                                    continue
-                                    ;;
-                            esac
-                        done
-                        [ "$nav" = "home" ] && break
-                        break
-                        ;;
-                    2)
-                        # Download video
-                        while true; do
-                            clear
-                            quality=$(quality_menu)
-
-                            case "$quality" in
-                                1|2|3|4)
-                                    if download_video "$viewkey" "$quality"; then
-                                        clear
-                                        dl_action=$(post_download_menu)
-
-                                        case "$dl_action" in
-                                            1)
-                                                continue
-                                                ;;
-                                            2)
-                                                break
-                                                ;;
-                                            3)
-                                                nav="home"
-                                                break
-                                                ;;
-                                            q|Q)
-                                                clear
-                                                exit 0
-                                                ;;
-                                            *)
-                                                continue
-                                                ;;
-                                        esac
-                                    else
-                                        break
-                                    fi
-                                    ;;
-                                b|B)
-                                    break
-                                    ;;
-                                *)
-                                    continue
-                                    ;;
-                            esac
-                        done
-                        [ "$nav" = "home" ] && break
-                        break
-                        ;;
-                    3)
-                        # Open in browser
-                        open_in_browser "$viewkey"
-                        continue
-                        ;;
-                    b|B)
-                        break
+                echo "" > /dev/tty
+                echo -e "  ${RED}❌ Error searching videos:${NC}" > /dev/tty
+                if [ -n "$search_err" ]; then
+                    echo -e "  ${ROSE}${search_err}${NC}" > /dev/tty
+                else
+                    echo -e "  ${ROSE}Failed to retrieve search results.${NC}" > /dev/tty
+                fi
+                echo "" > /dev/tty
+                read -r -p "  Retry search? (y/n, default: y): " retry_search </dev/tty
+                case "$retry_search" in
+                    n|N|q|Q)
+                        break 2
                         ;;
                     *)
                         continue
@@ -355,11 +544,176 @@ while true; do
                 esac
             done
 
-            if [ "$nav" = "home" ]; then
-                nav=""
-                break
+            if [ -z "$video_list" ]; then
+                echo "" > /dev/tty
+                if [ "$page" -eq 1 ]; then
+                    echo -e "  ${GOLD}ℹ No videos found matching '${query}'.${NC}" > /dev/tty
+                    echo "" > /dev/tty
+                    read -r -p "  Press Enter to return to menu..." _ </dev/tty
+                    break
+                else
+                    echo -e "  ${GOLD}ℹ No more videos found on page $page.${NC}" > /dev/tty
+                    echo "" > /dev/tty
+                    read -r -p "  Press Enter to go to previous page..." _ </dev/tty
+                    ((page--))
+                    [ "$page" -lt 1 ] && page=1
+                    continue
+                fi
             fi
+
+            # Add navigation options
+            nav_options=""
+            [ "$page" -gt 1 ] && nav_options="PREV|<<< Previous page\n"
+            nav_options="${nav_options}NEXT|>>> Next page"
+
+            # Results selection loop (returns to the same list without re-fetching!)
+            while true; do
+                video=$(printf "%s\n%b" "$video_list" "$nav_options" | fzf "${PHUBCLI_FZF_OPTS[@]}" \
+                    --prompt="Search (page $page) ❯ " \
+                    --height=100% \
+                    --border \
+                    --layout=reverse \
+                    --cycle \
+                    --delimiter="|" \
+                    --with-nth=2 \
+                    --preview='echo {} | cut -d"|" -f2' \
+                    --preview-window=down:4:wrap)
+
+                [ -z "$video" ] && break 2 # Return to main menu
+
+                viewkey=$(echo "$video" | awk -F'|' '{print $1}')
+
+                # Handle pagination
+                if [ "$viewkey" = "NEXT" ]; then
+                    ((page++))
+                    break # break results loop to fetch next page
+                elif [ "$viewkey" = "PREV" ]; then
+                    ((page--))
+                    [ "$page" -lt 1 ] && page=1
+                    break # break results loop to fetch prev page
+                fi
+
+                # Direct 720p autodownload when mode is on
+                if [ "$auto_mode" = "on" ]; then
+                    download_video "$viewkey" 2
+                    sleep 1
+                    continue
+                fi
+
+                # Pre-play menu loop
+                while true; do
+                    clear
+                    pre_action=$(pre_play_menu)
+
+                    case "$pre_action" in
+                        1)
+                            # Watch video
+                            while true; do
+                                play_video "$viewkey"
+                                clear
+                                action=$(post_play_menu)
+
+                                case "$action" in
+                                    1)
+                                        continue
+                                        ;;
+                                    2)
+                                        break 2 # Back to results list
+                                        ;;
+                                    3)
+                                        nav="home"
+                                        break 2 # Back to home
+                                        ;;
+                                    q|Q)
+                                        clear
+                                        exit 0
+                                        ;;
+                                    *)
+                                        continue
+                                        ;;
+                                esac
+                            done
+                            break
+                            ;;
+                        2)
+                            # Download video
+                            while true; do
+                                clear
+                                quality=$(quality_menu)
+
+                                case "$quality" in
+                                    1|2|3|4)
+                                        if download_video "$viewkey" "$quality"; then
+                                            clear
+                                            dl_action=$(post_download_menu)
+
+                                            case "$dl_action" in
+                                                1)
+                                                    continue
+                                                    ;;
+                                                2)
+                                                    break 2 # Back to results
+                                                    ;;
+                                                3)
+                                                    nav="home"
+                                                    break 2 # Back to home
+                                                    ;;
+                                                q|Q)
+                                                    clear
+                                                    exit 0
+                                                    ;;
+                                                *)
+                                                    continue
+                                                    ;;
+                                            esac
+                                        else
+                                            break
+                                        fi
+                                        ;;
+                                    b|B)
+                                        break
+                                        ;;
+                                    *)
+                                        continue
+                                        ;;
+                                esac
+                            done
+                            continue
+                            ;;
+                        3)
+                            # Open in browser
+                            open_in_browser "$viewkey"
+                            continue
+                            ;;
+                        b|B)
+                            break # Back to results list
+                            ;;
+                        *)
+                            continue
+                            ;;
+                    esac
+                done
+
+                if [ "$nav" = "home" ]; then
+                    nav=""
+                    break 2 # return to main menu
+                fi
+            done
         done
+        ;;
+
+    #Autodownload
+    3|d|D|a|A)
+        clear
+        curr_mode=$(get_autodownload_mode)
+        mode_choice=$(autodownload_menu "$curr_mode")
+        case "$mode_choice" in
+            1) set_autodownload_mode "off" ;;
+            2) set_autodownload_mode "on" ;;
+            3) set_autodownload_mode "page_mode" ;;
+            *) ;;
+        esac
+        continue
         ;;
 
     #Update

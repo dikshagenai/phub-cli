@@ -13,7 +13,7 @@ SHARE="$PREFIX/share/phub-cli"
 echo "▶ Installing phub-cli"
 
 #dependency checks
-deps=(bash mpv fzf yt-dlp python3)
+deps=(bash mpv fzf yt-dlp python3 curl jq)
 for d in "${deps[@]}"; do
   if ! command -v "$d" >/dev/null; then
     echo "❌ Missing dependency: $d"
@@ -21,13 +21,28 @@ for d in "${deps[@]}"; do
   fi
 done
 
-#dependency checks
+# Optional recommendation: aria2
+if ! command -v aria2c >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/aria2c" ]; then
+  echo "ℹ️  Optional: install aria2 for 10x-15x faster downloads (sudo pacman -S aria2 / sudo apt install aria2)"
+fi
+
+#dependency checks: beautifulsoup4
 if ! python3 - <<EOF >/dev/null 2>&1; then
 import bs4
 EOF
   echo "❌ Missing python dependency: beautifulsoup4"
   echo "   Arch: sudo pacman -S python-beautifulsoup4"
   echo "   Debian/Ubuntu: sudo apt install python3-bs4"
+  exit 1
+fi
+
+#dependency checks: requests
+if ! python3 - <<EOF >/dev/null 2>&1; then
+import requests
+EOF
+  echo "❌ Missing python dependency: requests"
+  echo "   Arch: sudo pacman -S python-requests"
+  echo "   Debian/Ubuntu: sudo apt install python3-requests"
   exit 1
 fi
 

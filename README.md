@@ -1,207 +1,137 @@
 <p align="center">
-<br>
-<a href="http://makeapullrequest.com"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg"></a>
-<img src="https://img.shields.io/badge/os-linux-brightgreen">
-<img src="https://img.shields.io/badge/os-mac-yellowgreen">
-<img src="https://img.shields.io/badge/interface-terminal-blue">
-<img src="https://img.shields.io/badge/player-mpv-red">
-<br>
+  <img src="https://img.shields.io/badge/os-linux-brightgreen">
+  <img src="https://img.shields.io/badge/os-mac-yellowgreen">
+  <img src="https://img.shields.io/badge/interface-terminal-blue">
+  <img src="https://img.shields.io/badge/player-mpv-red">
 </p>
 
-<h1 align="center">
-phub-cli
-</h1>
+<h1 align="center">phub-cli</h1>
 
 <h3 align="center">
 A terminal-based video browser inspired by ani-cli.<br>
-Browse, search, and stream directly from <a href="https://www.pornhub.com/">pornhub.com</a> — no browser required.
+Browse, search, stream, and download directly from the terminal — no browser required.
 </h3>
 
 <p align="center">
-<b>Made with lust.</b><br>
+  <b>Made with lust.</b>
 </p>
 
+> [!NOTE]
+> **Maintained Fork**: This project is a continuation of the original [curtosis-org/phub-cli](https://github.com/curtosis-org/phub-cli). All credit and appreciation go to [curtosis-org](https://github.com/curtosis-org) and the original contributors for creating this tool. Ongoing maintenance continues here at [dikshagenai/phub-cli](https://github.com/dikshagenai/phub-cli).
+
 ---
-
-## Showcase
-
-```bash
-phub-cli
-```
 
 ## Features
 
-- Browse categories using fzf
-- Search videos by keyword
-- Paginated results for large categories and searches
-- Instant streaming via mpv
-- Direct stream extraction using yt-dlp
-- Download videos in multiple qualities (1080p, 720p, 480p, 360p)
-- Open videos directly in your default browser
-- ani-cli–style navigation flow
-- Graceful handling of broken or unavailable videos
-- Built-in auto-updater to silently check for and install new releases
-- Clean terminal UI with interactive menus
-- No browser required for playback
-- No accounts, no tracking, no clutter
-
+- **Search & Browse**: Keyword search and category browsing with paginated results via `fzf`
+- **Instant Playback**: Stream videos directly with `mpv` without opening a browser
+- **Direct Downloads**: Download videos in multiple resolutions (1080p, 720p, 480p, 360p)
+- **Autodownload Modes**: Global toggle supporting 3 modes:
+  - `off`: Default interactive mode.
+  - `on`: One-click 720p auto-download on video selection (bypasses menus).
+  - `page_mode`: Multi-page batch downloader for categories and searches with parallel 5-worker queue and fragment speed acceleration.
+- **Browser Opener**: Quickly open any video in your default web browser
+- **Resilient**: Graceful handling of network drops, fast failure recovery, and retry options
+- **Keyboard-driven**: Fast, minimalist `ani-cli` style interaction
 
 ---
 
-## Table of Contents
-
-
-- [Installation](#installation)
-- [Dependencies](#dependencies)
-- [Usage](#usage)
-- [Tips](#tips)
-- [Fixing errors](#fixing-errors)
-- [Technical Notes](#technical-notes)
-- [Disclaimer](#disclaimer)
-
 ## Installation
 
-From source (recommended)
+This project is built and installed directly from source via GitHub:
 
 ```bash
-git clone https://github.com/curtosis-org/phub-cli.git
+git clone https://github.com/dikshagenai/phub-cli.git
 cd phub-cli
 chmod +x install.sh
 sudo ./install.sh
 ```
 
-After installation, run from anywhere:
+After installation, launch it from anywhere in your terminal:
 
 ```bash
 phub-cli
 ```
+
+To uninstall:
+
+```bash
+sudo ./uninstall.sh
+```
+
+---
 
 ## Dependencies
-phub-cli relies on external tools and system Python packages.
-You must install these before running the installer.
 
-# Required
-- bash
-- mpv
-- fzf
-- yt-dlp
-- jq : required for JSON parsing in stream and metadata handling
-- curl
-- python3
-- python3-bs4 (BeautifulSoup)
-- python3-requests (requests)
-- python3-curl-cffi : required for yt-dlp browser impersonation (fixes 403 errors)
+Make sure you have the required system and Python dependencies installed:
 
-### Arch Linux
-```bash
-sudo pacman -S mpv fzf yt-dlp python python-beautifulsoup4
-pip install curl_cffi --break-system-packages
-```
+### Required Tools
+- `bash`
+- `mpv`
+- `fzf`
+- `yt-dlp`
+- `curl`
+- `jq`
+- `aria2` (recommended for 10x-15x multi-connection download acceleration)
+- `python3` (with `beautifulsoup4`, `requests`, and `curl_cffi`)
 
-### Debian / Ubuntu
-```bash
-sudo apt install mpv fzf yt-dlp python3 python3-bs4
-pip install curl_cffi --break-system-packages
-```
+### Quick Install Commands
 
-### Fedora
-```bash
-sudo dnf install mpv fzf yt-dlp python3 python3-beautifulsoup4
-pip install curl_cffi --break-system-packages
-```
+- **Arch Linux**:
+  ```bash
+  sudo pacman -S mpv fzf yt-dlp curl jq aria2 python python-beautifulsoup4 python-requests
+  pip install curl_cffi --break-system-packages
+  ```
 
-### macOS (Homebrew)
-```bash
-brew install mpv fzf yt-dlp python
-pip3 install beautifulsoup4 curl_cffi
-```
+- **Debian / Ubuntu**:
+  ```bash
+  sudo apt install mpv fzf yt-dlp curl jq aria2 python3 python3-bs4 python3-requests
+  pip install curl_cffi --break-system-packages
+  ```
 
-## Usage
+- **Fedora**:
+  ```bash
+  sudo dnf install mpv fzf yt-dlp curl jq aria2 python3 python3-beautifulsoup4 python3-requests
+  pip install curl_cffi --break-system-packages
+  ```
+
+- **macOS (Homebrew)**:
+  ```bash
+  brew install mpv fzf yt-dlp curl jq aria2 python
+  pip3 install beautifulsoup4 requests curl_cffi
+  ```
+
+---
+
+## Usage & Options
 
 ```bash
 phub-cli
 ```
-You will be presented with:
 
-- Browse categories
-
-- Search videos
-
-- Quit
-
-Navigation is entirely keyboard-driven using fzf.
-
-## Tips
-
-Optional toggles:
+### Optional Environment Variables
 
 ```bash
 # Enable blinking title on the home screen
 PHUBCLI_BLINK=1 phub-cli
 
-# Disable the custom fzf theme
+# Disable custom fzf color theme
 PHUBCLI_FZF_THEME=0 phub-cli
+
+# Set autodownload mode (off | on | page_mode)
+PHUBCLI_AUTODOWNLOAD=page_mode phub-cli
 ```
 
-## Fixing errors
-If a video fails to play:
+---
 
-- It may be geo-blocked
-- It may be removed
-- It may require cookies/login
+## Acknowledgements
 
-phub-cli will:
-- detect fast failures 
-- return you to the selection menu
+All original credit and sincere thanks go to the creators and contributors of [curtosis-org/phub-cli](https://github.com/curtosis-org/phub-cli). This repository proudly carries forward the project torch.
 
-allow retry or navigation without crashing
+**Inspired by ani-cli. Built for terminals.**
 
-Ensure your dependencies are up to date:
-```bash
-yt-dlp -U
-pip install -U curl_cffi --break-system-packages
-```
-
-## Technical Notes
-
-- Uses yt-dlp to resolve stream URLs before playback
-- mpv is used only as a player, not as a scraper
-- Input is explicitly read from /dev/tty to avoid fzf / mpv stdin conflicts
-- No PhantomJS dependency
-- No virtualenv required
-- No downloads unless you modify the scripts yourself
-
-## Supported Platforms
-
-Tier 1 (tested)
-
-- Linux (Arch, Debian, Fedora)
-- macOS
-
-Tier 2 (may work)
-
-- WSL
-- Termux (manual setup)
-
-Windows, iOS, and consoles are not officially supported.
+---
 
 ## Disclaimer
-This project does not host, store, or distribute any media.
-It only provides a terminal interface to publicly accessible content.
 
-Use responsibly and in accordance with your local laws.
-
-
-
-
-
-
-
-
-**Inspired by ani-cli. Built for terminals. Powered by curiosity and lust.**
-
-
-
-## **Star History**
-[![Star History Chart](https://app.repohistory.com/api/svg?repo=curtosis-org/phub-cli&type=Date&background=0D1117&color=f862d3)](https://app.repohistory.com/star-history)
-
+This project does not host, store, or distribute any media. It only provides a terminal interface to publicly accessible content. Use responsibly and in accordance with your local laws.
