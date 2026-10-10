@@ -28,7 +28,7 @@ Browse, search, stream, and download directly from the terminal — no browser r
 - **Direct Downloads**: Download videos in multiple resolutions (1080p, 720p, 480p, 360p)
 - **Autodownload Modes**: Global toggle supporting 3 modes:
   - `off`: Default interactive mode.
-  - `on`: One-click 720p auto-download on video selection (bypasses menus).
+  - `on`: Multi-select parallel download mode. Select multiple videos at once with `[Tab]` (or `[Ctrl-A]`), browse across pages, and hit Enter / Next to download all selected videos concurrently.
   - `page_mode`: Multi-page batch downloader for categories and searches with parallel 5-worker queue and fragment speed acceleration.
 - **Browser Opener**: Quickly open any video in your default web browser
 - **Resilient**: Graceful handling of network drops, fast failure recovery, and retry options

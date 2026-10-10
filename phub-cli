@@ -72,7 +72,7 @@ get_autodownload_mode() {
     # Check environment variable first
     if [ -n "$PHUBCLI_AUTODOWNLOAD" ]; then
         case "$PHUBCLI_AUTODOWNLOAD" in
-            1|on|ON) echo "on"; return ;;
+            1|on|ON|multi|MULTI) echo "on"; return ;;
             page|pages|page_mode|PAGE_MODE) echo "page_mode"; return ;;
             0|off|OFF|*) echo "off"; return ;;
         esac
@@ -83,7 +83,7 @@ get_autodownload_mode() {
         local mode
         mode=$(grep -E "^AUTODOWNLOAD_MODE=" "$CONFIG_FILE" 2>/dev/null | cut -d'=' -f2 | tr -d ' "\r\n')
         case "$mode" in
-            on) echo "on"; return ;;
+            on|multi) echo "on"; return ;;
             page_mode) echo "page_mode"; return ;;
             *) echo "off"; return ;;
         esac
@@ -236,6 +236,7 @@ while true; do
             esac
         fi
 
+        dl_queue=$(mktemp)
         page=1
 
         # Pagination loop
@@ -296,6 +297,106 @@ while true; do
 
             # Results selection loop (returns to the same list without re-fetching!)
             while true; do
+                if [ "$auto_mode" = "on" ]; then
+                    queue_count=$(wc -l < "$dl_queue" 2>/dev/null | xargs)
+                    [ -z "$queue_count" ] && queue_count=0
+
+                    multi_nav=""
+                    if [ "$queue_count" -gt 0 ]; then
+                        multi_nav="DOWNLOAD|⬇️  DOWNLOAD QUEUED VIDEOS ($queue_count queued)\n"
+                    fi
+                    multi_nav="${multi_nav}NEXT|>>> Next page"
+                    [ "$page" -gt 1 ] && multi_nav="${multi_nav}\nPREV|<<< Previous page"
+
+                    multi_prompt="Select videos"
+                    [ "$queue_count" -gt 0 ] && multi_prompt="Select videos [$queue_count queued]"
+                    multi_prompt="${multi_prompt} (page $page) ❯ "
+
+                    selected_raw=$(printf "%s\n%b" "$video_list" "$multi_nav" | fzf "${PHUBCLI_FZF_OPTS[@]}" \
+                        --multi \
+                        --expect=ctrl-n,ctrl-p \
+                        --bind="ctrl-a:select-all,ctrl-d:deselect-all" \
+                        --header="[TAB] Select/Deselect | [Ctrl-A] Select All | [ENTER] Next / Download | [Ctrl-N] Next Page" \
+                        --prompt="$multi_prompt" \
+                        --height=100% \
+                        --border \
+                        --layout=reverse \
+                        --cycle \
+                        --delimiter="|" \
+                        --with-nth=2 \
+                        --preview='echo {} | cut -d"|" -f2' \
+                        --preview-window=down:4:wrap)
+
+                    fzf_code=$?
+                    if [ "$fzf_code" -ne 0 ] || [ -z "$selected_raw" ]; then
+                        if [ "$queue_count" -gt 0 ]; then
+                            echo "" > /dev/tty
+                            read -r -p "  You have $queue_count video(s) queued. Discard queue and exit? (y/n, default: y): " discard_q < /dev/tty
+                            case "$discard_q" in
+                                n|N) continue ;;
+                                *) rm -f "$dl_queue"; break 2 ;;
+                            esac
+                        else
+                            rm -f "$dl_queue"
+                            break 2
+                        fi
+                    fi
+
+                    key_pressed=$(head -n 1 <<< "$selected_raw")
+                    selection_lines=$(tail -n +2 <<< "$selected_raw")
+
+                    # Handle Ctrl-N (Next page)
+                    if [ "$key_pressed" = "ctrl-n" ]; then
+                        if [ -n "$selection_lines" ]; then
+                            echo "$selection_lines" | grep '|' | grep -vE '^(NEXT|PREV|DOWNLOAD)\|' >> "$dl_queue" || true
+                        fi
+                        ((page++))
+                        break
+                    fi
+
+                    # Handle Ctrl-P (Previous page)
+                    if [ "$key_pressed" = "ctrl-p" ]; then
+                        if [ -n "$selection_lines" ]; then
+                            echo "$selection_lines" | grep '|' | grep -vE '^(NEXT|PREV|DOWNLOAD)\|' >> "$dl_queue" || true
+                        fi
+                        ((page--))
+                        [ "$page" -lt 1 ] && page=1
+                        break
+                    fi
+
+                    # Handle Enter key
+                    has_next=$(echo "$selection_lines" | grep -E '^NEXT\|' || true)
+                    has_prev=$(echo "$selection_lines" | grep -E '^PREV\|' || true)
+
+                    actual_vids=$(echo "$selection_lines" | grep '|' | grep -vE '^(NEXT|PREV|DOWNLOAD)\|' || true)
+                    if [ -n "$actual_vids" ]; then
+                        echo "$actual_vids" >> "$dl_queue"
+                    fi
+
+                    if [ -n "$has_next" ]; then
+                        ((page++))
+                        break
+                    fi
+
+                    if [ -n "$has_prev" ]; then
+                        ((page--))
+                        [ "$page" -lt 1 ] && page=1
+                        break
+                    fi
+
+                    confirm_and_run_batch_download "$dl_queue" "720p"
+                    res=$?
+                    case "$res" in
+                        0|3)
+                            rm -f "$dl_queue"
+                            break 2
+                            ;;
+                        *)
+                            continue
+                            ;;
+                    esac
+                fi
+
                 video=$(printf "%s\n%b" "$video_list" "$nav_options" | fzf "${PHUBCLI_FZF_OPTS[@]}" \
                     --prompt="Video (page $page) ❯ " \
                     --height=100% \
@@ -307,7 +408,7 @@ while true; do
                     --preview='echo {} | cut -d"|" -f2' \
                     --preview-window=down:4:wrap)
 
-                [ -z "$video" ] && break 2 # Return to main menu
+                [ -z "$video" ] && { rm -f "$dl_queue"; break 2; } # Return to main menu
 
                 viewkey=$(echo "$video" | awk -F'|' '{print $1}')
 
@@ -319,13 +420,6 @@ while true; do
                     ((page--))
                     [ "$page" -lt 1 ] && page=1
                     break # break results loop to fetch prev page
-                fi
-
-                # Direct 720p autodownload when mode is on
-                if [ "$auto_mode" = "on" ]; then
-                    download_video "$viewkey" 2
-                    sleep 1
-                    continue
                 fi
 
                 # Pre-play menu loop
@@ -428,6 +522,7 @@ while true; do
                 fi
             done
         done
+        rm -f "$dl_queue"
         ;;
 
     #Search
@@ -508,6 +603,7 @@ while true; do
             esac
         fi
 
+        dl_queue=$(mktemp)
         page=1
 
         # Pagination loop
@@ -568,6 +664,106 @@ while true; do
 
             # Results selection loop (returns to the same list without re-fetching!)
             while true; do
+                if [ "$auto_mode" = "on" ]; then
+                    queue_count=$(wc -l < "$dl_queue" 2>/dev/null | xargs)
+                    [ -z "$queue_count" ] && queue_count=0
+
+                    multi_nav=""
+                    if [ "$queue_count" -gt 0 ]; then
+                        multi_nav="DOWNLOAD|⬇️  DOWNLOAD QUEUED VIDEOS ($queue_count queued)\n"
+                    fi
+                    multi_nav="${multi_nav}NEXT|>>> Next page"
+                    [ "$page" -gt 1 ] && multi_nav="${multi_nav}\nPREV|<<< Previous page"
+
+                    multi_prompt="Select videos"
+                    [ "$queue_count" -gt 0 ] && multi_prompt="Select videos [$queue_count queued]"
+                    multi_prompt="${multi_prompt} (page $page) ❯ "
+
+                    selected_raw=$(printf "%s\n%b" "$video_list" "$multi_nav" | fzf "${PHUBCLI_FZF_OPTS[@]}" \
+                        --multi \
+                        --expect=ctrl-n,ctrl-p \
+                        --bind="ctrl-a:select-all,ctrl-d:deselect-all" \
+                        --header="[TAB] Select/Deselect | [Ctrl-A] Select All | [ENTER] Next / Download | [Ctrl-N] Next Page" \
+                        --prompt="$multi_prompt" \
+                        --height=100% \
+                        --border \
+                        --layout=reverse \
+                        --cycle \
+                        --delimiter="|" \
+                        --with-nth=2 \
+                        --preview='echo {} | cut -d"|" -f2' \
+                        --preview-window=down:4:wrap)
+
+                    fzf_code=$?
+                    if [ "$fzf_code" -ne 0 ] || [ -z "$selected_raw" ]; then
+                        if [ "$queue_count" -gt 0 ]; then
+                            echo "" > /dev/tty
+                            read -r -p "  You have $queue_count video(s) queued. Discard queue and exit? (y/n, default: y): " discard_q < /dev/tty
+                            case "$discard_q" in
+                                n|N) continue ;;
+                                *) rm -f "$dl_queue"; break 2 ;;
+                            esac
+                        else
+                            rm -f "$dl_queue"
+                            break 2
+                        fi
+                    fi
+
+                    key_pressed=$(head -n 1 <<< "$selected_raw")
+                    selection_lines=$(tail -n +2 <<< "$selected_raw")
+
+                    # Handle Ctrl-N (Next page)
+                    if [ "$key_pressed" = "ctrl-n" ]; then
+                        if [ -n "$selection_lines" ]; then
+                            echo "$selection_lines" | grep '|' | grep -vE '^(NEXT|PREV|DOWNLOAD)\|' >> "$dl_queue" || true
+                        fi
+                        ((page++))
+                        break
+                    fi
+
+                    # Handle Ctrl-P (Previous page)
+                    if [ "$key_pressed" = "ctrl-p" ]; then
+                        if [ -n "$selection_lines" ]; then
+                            echo "$selection_lines" | grep '|' | grep -vE '^(NEXT|PREV|DOWNLOAD)\|' >> "$dl_queue" || true
+                        fi
+                        ((page--))
+                        [ "$page" -lt 1 ] && page=1
+                        break
+                    fi
+
+                    # Handle Enter key
+                    has_next=$(echo "$selection_lines" | grep -E '^NEXT\|' || true)
+                    has_prev=$(echo "$selection_lines" | grep -E '^PREV\|' || true)
+
+                    actual_vids=$(echo "$selection_lines" | grep '|' | grep -vE '^(NEXT|PREV|DOWNLOAD)\|' || true)
+                    if [ -n "$actual_vids" ]; then
+                        echo "$actual_vids" >> "$dl_queue"
+                    fi
+
+                    if [ -n "$has_next" ]; then
+                        ((page++))
+                        break
+                    fi
+
+                    if [ -n "$has_prev" ]; then
+                        ((page--))
+                        [ "$page" -lt 1 ] && page=1
+                        break
+                    fi
+
+                    confirm_and_run_batch_download "$dl_queue" "720p"
+                    res=$?
+                    case "$res" in
+                        0|3)
+                            rm -f "$dl_queue"
+                            break 2
+                            ;;
+                        *)
+                            continue
+                            ;;
+                    esac
+                fi
+
                 video=$(printf "%s\n%b" "$video_list" "$nav_options" | fzf "${PHUBCLI_FZF_OPTS[@]}" \
                     --prompt="Search (page $page) ❯ " \
                     --height=100% \
@@ -579,7 +775,7 @@ while true; do
                     --preview='echo {} | cut -d"|" -f2' \
                     --preview-window=down:4:wrap)
 
-                [ -z "$video" ] && break 2 # Return to main menu
+                [ -z "$video" ] && { rm -f "$dl_queue"; break 2; } # Return to main menu
 
                 viewkey=$(echo "$video" | awk -F'|' '{print $1}')
 
@@ -591,13 +787,6 @@ while true; do
                     ((page--))
                     [ "$page" -lt 1 ] && page=1
                     break # break results loop to fetch prev page
-                fi
-
-                # Direct 720p autodownload when mode is on
-                if [ "$auto_mode" = "on" ]; then
-                    download_video "$viewkey" 2
-                    sleep 1
-                    continue
                 fi
 
                 # Pre-play menu loop
@@ -700,6 +889,7 @@ while true; do
                 fi
             done
         done
+        rm -f "$dl_queue"
         ;;
 
     #Autodownload
