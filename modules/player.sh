@@ -293,3 +293,87 @@ batch_download_videos() {
         --concurrency "$concurrency" \
         --fragments 4
 }
+
+confirm_and_run_batch_download() {
+    local queue_file="$1"
+    local default_quality="${2:-720p}"
+    local unique_dl_tmp
+    unique_dl_tmp=$(mktemp)
+    awk -F'|' '!seen[$1]++' "$queue_file" > "$unique_dl_tmp"
+    local total_selected
+    total_selected=$(wc -l < "$unique_dl_tmp" | xargs)
+
+    if [ -z "$total_selected" ] || [ "$total_selected" -eq 0 ]; then
+        echo "" > /dev/tty
+        echo -e "  ${GOLD}ℹ No videos selected. Use [Tab] to select videos first.${NC}" > /dev/tty
+        rm -f "$unique_dl_tmp"
+        sleep 1.2
+        return 1
+    fi
+
+    clear
+    echo "" > /dev/tty
+    echo -e "  ${BOLD_RED}┌────────────────────────────────────────────────────────┐${NC}" > /dev/tty
+    echo -e "  ${BOLD_RED}│${NC}              ${HOT_PINK}${BOLD}Parallel Download Queue${NC}                   ${BOLD_RED}│${NC}" > /dev/tty
+    echo -e "  ${BOLD_RED}└────────────────────────────────────────────────────────┘${NC}" > /dev/tty
+    echo "" > /dev/tty
+    echo -e "  ${MAGENTA}📋 Selected videos:${NC} ${BOLD}$total_selected${NC}" > /dev/tty
+    echo -e "  ${DEEP_PINK}📁 Destination:${NC} $HOME/Videos/phub-cli" > /dev/tty
+    echo -e "  ${GOLD}⚡ Concurrency:${NC} 5 parallel downloads (with aria2 accelerator)" > /dev/tty
+    echo "" > /dev/tty
+    echo -e "  ${PINK}Queued videos:${NC}" > /dev/tty
+    head -n 6 "$unique_dl_tmp" | while IFS='|' read -r vk title; do
+        echo -e "    ${HOT_PINK}•${NC} ${title}" > /dev/tty
+    done
+    if [ "$total_selected" -gt 6 ]; then
+        echo -e "    ${ROSE}... and $((total_selected - 6)) more${NC}" > /dev/tty
+    fi
+    echo "" > /dev/tty
+    echo -e "  ${HOT_PINK}[1]${NC} ${PINK}Start parallel download (${default_quality} - Enter)${NC}" > /dev/tty
+    echo -e "  ${HOT_PINK}[2]${NC} ${PINK}Choose resolution (Best / 720p / 480p / 360p)${NC}" > /dev/tty
+    echo -e "  ${HOT_PINK}[3]${NC} ${PINK}Add more videos (keep queue and back to list)${NC}" > /dev/tty
+    echo -e "  ${HOT_PINK}[c]${NC} ${PINK}Cancel and clear queue${NC}" > /dev/tty
+    echo "" > /dev/tty
+    read -r -p "$(printf '%b' "${HOT_PINK}Select option (default: 1) ❯ ${NC}")" dl_choice < /dev/tty
+
+    case "$dl_choice" in
+        2)
+            local q_choice
+            q_choice=$(quality_menu)
+            local target_q="720p"
+            case "$q_choice" in
+                1) target_q="best" ;;
+                2) target_q="720p" ;;
+                3) target_q="480p" ;;
+                4) target_q="360p" ;;
+                b|B)
+                    rm -f "$unique_dl_tmp"
+                    return 2
+                    ;;
+            esac
+            batch_download_videos "$unique_dl_tmp" "$target_q"
+            rm -f "$unique_dl_tmp"
+            > "$queue_file"
+            echo "" > /dev/tty
+            read -r -p "$(printf '%b' "  ${HOT_PINK}Press Enter to return to menu...${NC}")" _ < /dev/tty
+            return 0
+            ;;
+        3)
+            rm -f "$unique_dl_tmp"
+            return 2
+            ;;
+        c|C|q|Q)
+            rm -f "$unique_dl_tmp"
+            > "$queue_file"
+            return 3
+            ;;
+        1|""|*)
+            batch_download_videos "$unique_dl_tmp" "$default_quality"
+            rm -f "$unique_dl_tmp"
+            > "$queue_file"
+            echo "" > /dev/tty
+            read -r -p "$(printf '%b' "  ${HOT_PINK}Press Enter to return to menu...${NC}")" _ < /dev/tty
+            return 0
+            ;;
+    esac
+}

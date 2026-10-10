@@ -125,7 +125,7 @@ show_home() {
     local auto_mode="${1:-off}"
     local mode_label
     case "$auto_mode" in
-        on) mode_label="on" ;;
+        on|multi) mode_label="multi" ;;
         page_mode) mode_label="page_mode" ;;
         *) mode_label="off" ;;
     esac
@@ -144,13 +144,13 @@ show_home() {
 
 autodownload_menu() {
     local current_mode="${1:-off}"
-    local w=44
+    local w=46
     printf '\n' > /dev/tty
     _ui_box_top "$w" > /dev/tty
     _ui_box_title "$w" "Autodownload Settings" > /dev/tty
     _ui_menu_line "$w" "[1]" "Off (Standard interactive mode)" > /dev/tty
-    _ui_menu_line "$w" "[2]" "On (Direct 720p download on pick)" > /dev/tty
-    _ui_menu_line "$w" "[3]" "Page mode (Batch parallel download)" > /dev/tty
+    _ui_menu_line "$w" "[2]" "Multi (Select & parallel download)" > /dev/tty
+    _ui_menu_line "$w" "[3]" "Page mode (Batch scrape pages)" > /dev/tty
     _ui_menu_line "$w" "[b]" "Back" > /dev/tty
     _ui_box_bottom "$w" > /dev/tty
     printf '\n' > /dev/tty
