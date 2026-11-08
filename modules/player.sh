@@ -2,6 +2,7 @@
 
 #importing colors
 DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$DIR/modules/config.sh"
 source "$DIR/modules/ui.sh"
 
 #spinner 
@@ -121,10 +122,18 @@ download_video() {
     viewkey="$1"
     quality="$2"
     page_url="https://www.pornhub.org/view_video.php?viewkey=$viewkey"
-    download_dir="$HOME/Videos/phub-cli"
+    download_dir=$(get_download_dir)
+    local is_remote=0
+    local dl_target_dir="$download_dir"
+    local staging_dir="${XDG_CACHE_HOME:-$HOME/.cache}/phub-cli/staging"
 
-    # Create download directory if it doesn't exist
-    mkdir -p "$download_dir"
+    if is_remote_target "$download_dir"; then
+        is_remote=1
+        dl_target_dir="$staging_dir"
+        mkdir -p "$dl_target_dir"
+    else
+        mkdir -p "$download_dir"
+    fi
 
     # Set format based on quality selection (prioritize direct https mp4 for reliability and resumability)
     case "$quality" in
@@ -170,7 +179,12 @@ download_video() {
         echo -e "  ${PINK}$pick2${NC}" > /dev/tty
         echo "" > /dev/tty
         echo -e "  ${GOLD}📺 Quality: $quality_name${NC}" > /dev/tty
-        echo -e "  ${DEEP_PINK}📁 Destination: $download_dir${NC}" > /dev/tty
+        if [ "$is_remote" -eq 1 ]; then
+            echo -e "  ${DEEP_PINK}🌐 Remote Target: $download_dir${NC}" > /dev/tty
+            echo -e "  ${MAGENTA}📁 Local Staging: $dl_target_dir${NC}" > /dev/tty
+        else
+            echo -e "  ${DEEP_PINK}📁 Destination: $download_dir${NC}" > /dev/tty
+        fi
         echo "" > /dev/tty
 
         local dl_log
@@ -208,7 +222,7 @@ download_video() {
         yt-dlp \
             --cookies-from-browser=firefox \
             -f "$format" \
-            -o "$download_dir/%(title)s.%(ext)s" \
+            -o "$dl_target_dir/%(title)s.%(ext)s" \
             "${ytdl_opts[@]}" \
             "$page_url" 2>&1 | tee "$dl_log" > /dev/tty
 
@@ -221,16 +235,37 @@ download_video() {
             > "$dl_log"
             yt-dlp \
                 -f "$format" \
-                -o "$download_dir/%(title)s.%(ext)s" \
+                -o "$dl_target_dir/%(title)s.%(ext)s" \
                 "${ytdl_opts[@]}" \
                 "$page_url" 2>&1 | tee "$dl_log" > /dev/tty
             download_status=${PIPESTATUS[0]}
         fi
 
         if [ "$download_status" -eq 0 ]; then
+            if [ "$is_remote" -eq 1 ]; then
+                # Find the most recently downloaded file in staging
+                local downloaded_file
+                downloaded_file=$(ls -t "$dl_target_dir"/* 2>/dev/null | head -n 1)
+                if [ -n "$downloaded_file" ] && [ -f "$downloaded_file" ]; then
+                    local remote_base="${download_dir%/}/"
+                    echo "" > /dev/tty
+                    echo -e "  ${GOLD}🚀 Uploading to remote server: ${download_dir}...${NC}" > /dev/tty
+                    if curl --connect-timeout 10 -m 7200 --ftp-create-dirs --progress-bar -T "$downloaded_file" "$remote_base"; then
+                        echo "" > /dev/tty
+                        echo -e "  ${GOLD}✅ Successfully uploaded to: $download_dir${NC}" > /dev/tty
+                        rm -f "$downloaded_file"
+                    else
+                        echo "" > /dev/tty
+                        echo -e "  ${ROSE}⚠️  Remote upload failed. Saving copy safely to: $DEFAULT_DOWNLOAD_DIR${NC}" > /dev/tty
+                        mkdir -p "$DEFAULT_DOWNLOAD_DIR" 2>/dev/null
+                        mv -f "$downloaded_file" "$DEFAULT_DOWNLOAD_DIR/" 2>/dev/null || true
+                    fi
+                fi
+            fi
+
             echo "" > /dev/tty
             echo -e "  ${GOLD}✅ Download complete!${NC}" > /dev/tty
-            echo -e "  ${DEEP_PINK}📁 Saved to: $download_dir${NC}" > /dev/tty
+            echo -e "  ${DEEP_PINK}📁 Destination: $download_dir${NC}" > /dev/tty
             sleep 1
             rm -f "$dl_log"
             return 0
@@ -244,14 +279,14 @@ download_video() {
             fi
             echo -e "  ${ROSE}😞 Video might be unavailable, restricted, or network connection dropped.${NC}" > /dev/tty
             echo "" > /dev/tty
-            read -r -p "  Retry download? (y/n, default: n): " retry_dl </dev/tty
+            read -r -p "  Retry download? (Y/n, default: y): " retry_dl </dev/tty
             rm -f "$dl_log"
             case "$retry_dl" in
-                y|Y)
-                    continue
+                n|N|q|Q)
+                    return 1
                     ;;
                 *)
-                    return 1
+                    continue
                     ;;
             esac
         fi
@@ -282,9 +317,12 @@ batch_download_videos() {
     local list_file="$1"
     local quality="${2:-720p}"
     local concurrency="${3:-5}"
-    local download_dir="$HOME/Videos/phub-cli"
+    local download_dir
+    download_dir=$(get_download_dir)
 
-    mkdir -p "$download_dir"
+    if ! is_remote_target "$download_dir"; then
+        mkdir -p "$download_dir"
+    fi
 
     python3 "$DIR/modules/downloader.py" \
         --list "$list_file" \
@@ -311,6 +349,9 @@ confirm_and_run_batch_download() {
         return 1
     fi
 
+    local current_dest
+    current_dest=$(get_download_dir)
+
     clear
     echo "" > /dev/tty
     echo -e "  ${BOLD_RED}┌────────────────────────────────────────────────────────┐${NC}" > /dev/tty
@@ -318,7 +359,7 @@ confirm_and_run_batch_download() {
     echo -e "  ${BOLD_RED}└────────────────────────────────────────────────────────┘${NC}" > /dev/tty
     echo "" > /dev/tty
     echo -e "  ${MAGENTA}📋 Selected videos:${NC} ${BOLD}$total_selected${NC}" > /dev/tty
-    echo -e "  ${DEEP_PINK}📁 Destination:${NC} $HOME/Videos/phub-cli" > /dev/tty
+    echo -e "  ${DEEP_PINK}📁 Destination:${NC} $current_dest" > /dev/tty
     echo -e "  ${GOLD}⚡ Concurrency:${NC} 5 parallel downloads (with aria2 accelerator)" > /dev/tty
     echo "" > /dev/tty
     echo -e "  ${PINK}Queued videos:${NC}" > /dev/tty

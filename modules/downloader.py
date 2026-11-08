@@ -151,11 +151,105 @@ def extract_firefox_cookies():
     return None
 
 
+DEFAULT_DOWNLOAD_DIR = os.path.expanduser("~/Videos/phub-cli")
+STAGING_DOWNLOAD_DIR = os.path.expanduser("~/.cache/phub-cli/staging")
+
+
+def is_remote_target(target):
+    if not target:
+        return False
+    return bool(re.match(r'^(ftp|ftps|sftp)://', target, re.IGNORECASE))
+
+
+def check_ftp_writable(ftp_url):
+    """Test if remote FTP destination is reachable and writable via curl probe file."""
+    if not ftp_url.endswith("/"):
+        ftp_url += "/"
+    probe_name = f".phub_probe_{os.getpid()}"
+    test_content = b"probe"
+    try:
+        cmd = [
+            "curl", "-s", "-f",
+            "--connect-timeout", "4",
+            "-m", "8",
+            "--ftp-create-dirs",
+            "-T", "-",
+            f"{ftp_url}{probe_name}"
+        ]
+        proc = subprocess.run(cmd, input=test_content, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if proc.returncode == 0:
+            # Delete probe file
+            clean_path = re.sub(r'^[a-zA-Z]+://[^/]+', '', ftp_url).rstrip('/') + '/' + probe_name
+            del_cmd = ["curl", "-s", "-Q", f"DELE {clean_path}", ftp_url]
+            subprocess.run(del_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def upload_file_to_ftp(local_file_path, ftp_url):
+    """Upload local file to FTP directory using curl with directory auto-creation and progress reporting."""
+    if not ftp_url.endswith("/"):
+        ftp_url += "/"
+    cmd = [
+        "curl",
+        "--connect-timeout", "10",
+        "-m", "7200",
+        "--ftp-create-dirs",
+        "-T", local_file_path,
+        ftp_url
+    ]
+    proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return proc.returncode == 0
+
+
+def ensure_output_dir(target_dir):
+    if not target_dir:
+        target_dir = DEFAULT_DOWNLOAD_DIR
+
+    if is_remote_target(target_dir):
+        if check_ftp_writable(target_dir):
+            return target_dir
+        else:
+            sys.stderr.write(f"\n  {ROSE}⚠️  Notice: Cannot connect/write to remote target '{target_dir}'. Falling back to default: '{DEFAULT_DOWNLOAD_DIR}'{NC}\n\n")
+            try:
+                os.makedirs(DEFAULT_DOWNLOAD_DIR, exist_ok=True)
+            except Exception:
+                pass
+            return DEFAULT_DOWNLOAD_DIR
+
+    expanded = os.path.expanduser(target_dir)
+    try:
+        os.makedirs(expanded, exist_ok=True)
+        test_file = os.path.join(expanded, f".write_test_{os.getpid()}")
+        with open(test_file, "w") as fp:
+            fp.write("ok")
+        os.remove(test_file)
+        return expanded
+    except Exception as e:
+        sys.stderr.write(f"\n  {ROSE}⚠️  Notice: Cannot write to '{expanded}' ({e}). Falling back to default: '{DEFAULT_DOWNLOAD_DIR}'{NC}\n\n")
+        try:
+            os.makedirs(DEFAULT_DOWNLOAD_DIR, exist_ok=True)
+        except Exception:
+            pass
+        return DEFAULT_DOWNLOAD_DIR
+
+
 class ParallelDownloader:
     def __init__(self, videos, output_dir, quality="720p", concurrency=5, fragments=4, simulate=False):
         self.videos = videos  # list of (viewkey, title)
         self.total = len(videos)
-        self.output_dir = os.path.expanduser(output_dir)
+        validated_dest = ensure_output_dir(output_dir)
+        self.is_remote = is_remote_target(validated_dest)
+        if self.is_remote:
+            self.remote_url = validated_dest.rstrip('/') + '/'
+            self.output_dir = STAGING_DOWNLOAD_DIR
+        else:
+            self.remote_url = ""
+            self.output_dir = validated_dest
+
+        self.display_dest = validated_dest
         self.quality = quality
         self.concurrency = min(concurrency, 5)
         self.fragments = fragments
@@ -209,105 +303,167 @@ class ParallelDownloader:
         clean_title = re.sub(r'[\r\n\t]+', ' ', title).strip()
         display_title = (clean_title[:38] + "..") if len(clean_title) > 40 else clean_title
 
-        with self.slot_lock:
-            self.slots[slot_idx]["status"] = "downloading"
-            self.slots[slot_idx]["title"] = display_title
-            self.slots[slot_idx]["progress"] = "0%"
-            self.slots[slot_idx]["speed"] = "starting"
-            self.slots[slot_idx]["eta"] = ""
-
         page_url = f"https://www.pornhub.org/view_video.php?viewkey={viewkey}"
-        output_template = os.path.join(self.output_dir, "%(title)s.%(ext)s")
+        # Unique prefix for this item to locate output file reliably even with formatting
+        item_prefix = f"phub_{viewkey[:10]}_" if self.is_remote else ""
+        output_template = os.path.join(self.output_dir, f"{item_prefix}%(title)s.%(ext)s")
 
-        ytdl_cmd = [
-            "yt-dlp",
-            "--newline",
-            "--progress",
-            "--continue",
-            "--no-playlist",
-            "--retries", "5",
-            "--fragment-retries", "5",
-            "--file-access-retries", "3",
-            "--concurrent-fragments", str(self.fragments),
-            "--buffer-size", "1024K",
-            "--no-mtime",
-            "-f", self.format_str,
-            "-o", output_template,
-        ]
+        progress_regex_ytdl = re.compile(
+            r'\[download\]\s+([\d\.]+%)(?:\s+of\s+([^\s]+))?(?:\s+at\s+([^\s]+))?(?:\s+ETA\s+([^\s]+))?'
+        )
+        progress_regex_aria = re.compile(
+            r'\[#[a-f0-9]+\s+.*?\((\d+%?)\)\s+CN:\d+\s+DL:([^\s]+)\s+ETA:([^\s\]]+)\]'
+        )
 
-        if self.simulate:
-            ytdl_cmd.append("-s")
-        else:
-            aria_bin = get_aria2c_path()
-            if aria_bin:
-                ytdl_cmd.extend([
-                    "--downloader", aria_bin,
-                    "--downloader-args", "aria2c:--summary-interval=1 -x 16 -s 16 -k 1M -j 16"
-                ])
-
-        if cookie_file:
-            ytdl_cmd.extend(["--cookies", cookie_file])
-
-        ytdl_cmd.append(page_url)
-
-        proc = None
+        max_attempts = 3
         success = False
         error_msg = ""
 
         try:
-            proc = subprocess.Popen(
-                ytdl_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1
-            )
-            running_processes.add(proc)
-
-            progress_regex_ytdl = re.compile(
-                r'\[download\]\s+([\d\.]+%)(?:\s+of\s+([^\s]+))?(?:\s+at\s+([^\s]+))?(?:\s+ETA\s+([^\s]+))?'
-            )
-            progress_regex_aria = re.compile(
-                r'\[#[a-f0-9]+\s+.*?\((\d+%?)\)\s+CN:\d+\s+DL:([^\s]+)\s+ETA:([^\s\]]+)\]'
-            )
-
-            for line in iter(proc.stdout.readline, ''):
+            for attempt in range(1, max_attempts + 1):
                 if stop_requested:
                     break
-                line = line.strip()
-                if not line:
-                    continue
 
-                m_ytdl = progress_regex_ytdl.search(line)
-                m_aria = progress_regex_aria.search(line)
-                if m_ytdl:
-                    pct = m_ytdl.group(1) or ""
-                    spd = m_ytdl.group(3) or ""
-                    eta = m_ytdl.group(4) or ""
-                    with self.slot_lock:
-                        self.slots[slot_idx]["progress"] = pct
-                        if spd:
-                            self.slots[slot_idx]["speed"] = spd
-                        if eta:
-                            self.slots[slot_idx]["eta"] = eta
-                elif m_aria:
-                    pct, spd, eta = m_aria.groups()
-                    with self.slot_lock:
-                        self.slots[slot_idx]["progress"] = pct if "%" in pct else pct + "%"
-                        self.slots[slot_idx]["speed"] = spd if "B" in spd else spd + "B/s"
-                        self.slots[slot_idx]["eta"] = eta
-                elif "ERROR:" in line or "error:" in line:
-                    error_msg = line
+                with self.slot_lock:
+                    self.slots[slot_idx]["status"] = "downloading" if attempt == 1 else "retrying"
+                    self.slots[slot_idx]["title"] = display_title
+                    self.slots[slot_idx]["progress"] = "0%" if attempt == 1 else f"retry {attempt}/{max_attempts}"
+                    self.slots[slot_idx]["speed"] = "starting"
+                    self.slots[slot_idx]["eta"] = ""
 
-            proc.wait()
-            success = (proc.returncode == 0)
+                if attempt > 1:
+                    time.sleep(1.2 + (attempt - 1) * 0.5)
+                    if stop_requested:
+                        break
 
-        except Exception as e:
-            error_msg = str(e)
-            success = False
+                ytdl_cmd = [
+                    "yt-dlp",
+                    "--newline",
+                    "--progress",
+                    "--continue",
+                    "--no-playlist",
+                    "--retries", "10",
+                    "--fragment-retries", "10",
+                    "--file-access-retries", "5",
+                    "--concurrent-fragments", str(self.fragments),
+                    "--buffer-size", "1024K",
+                    "--no-mtime",
+                    "-f", self.format_str,
+                    "-o", output_template,
+                ]
+
+                if self.simulate:
+                    ytdl_cmd.append("-s")
+                else:
+                    aria_bin = get_aria2c_path()
+                    if aria_bin:
+                        ytdl_cmd.extend([
+                            "--downloader", aria_bin,
+                            "--downloader-args", "aria2c:--summary-interval=1 -x 16 -s 16 -k 1M -j 16"
+                        ])
+
+                # On attempt 3, if previous failure seemed cookie-related, try without cookies
+                use_cookies = cookie_file and (attempt < 3 or not re.search(r'cookie|sqlite|database', error_msg, re.I))
+                if use_cookies:
+                    ytdl_cmd.extend(["--cookies", cookie_file])
+
+                ytdl_cmd.append(page_url)
+
+                proc = None
+                try:
+                    proc = subprocess.Popen(
+                        ytdl_cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1
+                    )
+                    running_processes.add(proc)
+
+                    for line in iter(proc.stdout.readline, ''):
+                        if stop_requested:
+                            break
+                        line = line.strip()
+                        if not line:
+                            continue
+
+                        m_ytdl = progress_regex_ytdl.search(line)
+                        m_aria = progress_regex_aria.search(line)
+                        if m_ytdl:
+                            pct = m_ytdl.group(1) or ""
+                            spd = m_ytdl.group(3) or ""
+                            eta = m_ytdl.group(4) or ""
+                            with self.slot_lock:
+                                self.slots[slot_idx]["progress"] = pct
+                                if spd:
+                                    self.slots[slot_idx]["speed"] = spd
+                                if eta:
+                                    self.slots[slot_idx]["eta"] = eta
+                        elif m_aria:
+                            pct, spd, eta = m_aria.groups()
+                            with self.slot_lock:
+                                self.slots[slot_idx]["progress"] = pct if "%" in pct else pct + "%"
+                                self.slots[slot_idx]["speed"] = spd if "B" in spd else spd + "B/s"
+                                self.slots[slot_idx]["eta"] = eta
+                        elif "ERROR:" in line or "error:" in line:
+                            error_msg = line
+
+                    proc.wait()
+                    if proc.returncode == 0:
+                        success = True
+                        # If remote FTP, upload staged video file
+                        if self.is_remote:
+                            with self.slot_lock:
+                                self.slots[slot_idx]["status"] = "uploading"
+                                self.slots[slot_idx]["progress"] = "remote FTP"
+                                self.slots[slot_idx]["speed"] = "uploading"
+                                self.slots[slot_idx]["eta"] = ""
+
+                            # Locate staged file matching the unique item prefix
+                            staged_files = [
+                                os.path.join(self.output_dir, f)
+                                for f in os.listdir(self.output_dir)
+                                if f.startswith(item_prefix) and not f.endswith(".part") and not f.endswith(".ytdl")
+                            ] if os.path.exists(self.output_dir) else []
+
+                            if staged_files:
+                                # Pick the most recent matching file
+                                staged_files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+                                target_local_file = staged_files[0]
+
+                                # Rename locally to clean title (strip internal item prefix) before uploading
+                                clean_filename = os.path.basename(target_local_file)[len(item_prefix):]
+                                clean_upload_path = os.path.join(self.output_dir, clean_filename)
+                                try:
+                                    os.rename(target_local_file, clean_upload_path)
+                                except Exception:
+                                    clean_upload_path = target_local_file
+
+                                uploaded_ok = upload_file_to_ftp(clean_upload_path, self.remote_url)
+                                if uploaded_ok:
+                                    try:
+                                        os.remove(clean_upload_path)
+                                    except Exception:
+                                        pass
+                                else:
+                                    # Fallback: preserve local copy safely in DEFAULT_DOWNLOAD_DIR
+                                    try:
+                                        os.makedirs(DEFAULT_DOWNLOAD_DIR, exist_ok=True)
+                                        safe_fallback_path = os.path.join(DEFAULT_DOWNLOAD_DIR, os.path.basename(clean_upload_path))
+                                        shutil.move(clean_upload_path, safe_fallback_path)
+                                    except Exception:
+                                        pass
+                                    sys.stderr.write(f"\n  {ROSE}⚠️  Upload failed for '{clean_title}'. Preserved locally in {DEFAULT_DOWNLOAD_DIR}{NC}\n")
+                        break
+                    else:
+                        success = False
+                except Exception as e:
+                    error_msg = str(e)
+                    success = False
+                finally:
+                    if proc:
+                        running_processes.discard(proc)
         finally:
-            if proc:
-                running_processes.discard(proc)
             self.release_slot(slot_idx)
 
         with self.completed_lock:
@@ -321,9 +477,9 @@ class ParallelDownloader:
                 short_err = error_msg.replace("ERROR:", "").strip() if error_msg else "Unknown error"
                 if len(short_err) > 60:
                     short_err = short_err[:57] + "..."
-                self.failed_items.append((clean_title, short_err))
+                self.failed_items.append((viewkey, clean_title, short_err))
                 if not self.is_tty:
-                    print(f"[{self.completed_count}/{self.total}] ❌ Failed: {clean_title} ({short_err})")
+                    print(f"[{self.completed_count}/{self.total}] ❌ Failed after {max_attempts} tries: {clean_title} ({short_err})")
 
     def render_ui(self):
         """Render multi-slot status dashboard in interactive terminal."""
@@ -352,6 +508,10 @@ class ParallelDownloader:
                     stats = " ".join(filter(None, [prog, spd, eta]))
                     status_lines.append(
                         f"  {HOT_PINK}[Worker {s['slot']+1}]{NC} 🚀 {PINK}{s['title']:<40}{NC} {GOLD}[ {stats} ]{NC}"
+                    )
+                elif s["status"] == "uploading":
+                    status_lines.append(
+                        f"  {HOT_PINK}[Worker {s['slot']+1}]{NC} 🌐 {PINK}{s['title']:<40}{NC} {GOLD}[ Uploading to FTP... ]{NC}"
                     )
                 else:
                     status_lines.append(
@@ -392,7 +552,10 @@ class ParallelDownloader:
         print(f"  {BOLD_RED}┌────────────────────────────────────────────────────────────┐{NC}")
         print(f"  {BOLD_RED}│{NC}   {HOT_PINK}{BOLD}phub-cli Parallel Downloader (Max {self.concurrency} Workers){NC}            {BOLD_RED}│{NC}")
         print(f"  {BOLD_RED}└────────────────────────────────────────────────────────────┘{NC}")
-        print(f"  {HOT_PINK}📁 Destination:{NC} {GOLD}{self.output_dir}{NC}")
+        dest_display = self.remote_url if self.is_remote else self.output_dir
+        print(f"  {HOT_PINK}📁 Destination:{NC} {GOLD}{dest_display}{NC}")
+        if self.is_remote:
+            print(f"  {MAGENTA}💾 Local Cache:{NC} {GOLD}{self.output_dir}{NC}")
         print(f"  {PINK}📺 Quality:{NC}     {GOLD}{self.quality}{NC}")
         print(f"  {ROSE}⚡ Concurrency:{NC} {GOLD}{self.concurrency} parallel videos ({self.fragments} fragments/vid){NC}")
         aria_bin = get_aria2c_path()
@@ -435,16 +598,46 @@ class ParallelDownloader:
         print(f"  {BOLD_RED}│{NC}  {GREEN}✅ Succeeded:{NC}     {self.success_count:<40} {BOLD_RED}│{NC}")
         print(f"  {BOLD_RED}│{NC}  {RED}❌ Failed:{NC}        {self.failed_count:<40} {BOLD_RED}│{NC}")
         print(f"  {BOLD_RED}│{NC}  ⏱️ Elapsed Time:   {time_str:<40} {BOLD_RED}│{NC}")
-        print(f"  {BOLD_RED}│{NC}  📁 Destination:   {self.output_dir[-38:]:<40} {BOLD_RED}│{NC}")
+        dest_summary = (self.remote_url if self.is_remote else self.output_dir)[-38:]
+        print(f"  {BOLD_RED}│{NC}  📁 Destination:   {dest_summary:<40} {BOLD_RED}│{NC}")
         print(f"  {BOLD_RED}└────────────────────────────────────────────────────────────┘{NC}")
 
         if self.failed_items:
             print("")
             print(f"  {RED}⚠️  Failed downloads:{NC}")
-            for title, err in self.failed_items[:10]:
+            for vk, title, err in self.failed_items[:10]:
                 print(f"    • {ROSE}{title}{NC}: {err}")
             if len(self.failed_items) > 10:
                 print(f"    • ... and {len(self.failed_items) - 10} more.")
+
+            if not stop_requested:
+                print("")
+                prompt_msg = f"  {HOT_PINK}Retry downloading {len(self.failed_items)} failed video(s)? (Y/n, default: y) ❯ {NC}"
+                retry_choice = ""
+                try:
+                    try:
+                        with open("/dev/tty", "r") as tty_f:
+                            sys.stdout.write(prompt_msg)
+                            sys.stdout.flush()
+                            retry_choice = tty_f.readline().strip()
+                    except Exception:
+                        retry_choice = input(prompt_msg).strip()
+                except (EOFError, KeyboardInterrupt):
+                    retry_choice = "n"
+
+                if retry_choice.lower() not in ["n", "no", "q", "quit"]:
+                    retry_vids = [(vk, t) for vk, t, err in self.failed_items]
+                    print(f"\n  {GOLD}🔄 Re-queuing {len(retry_vids)} failed video(s) for download...{NC}\n")
+                    time.sleep(0.8)
+                    retry_downloader = ParallelDownloader(
+                        videos=retry_vids,
+                        output_dir=self.output_dir,
+                        quality=self.quality,
+                        concurrency=self.concurrency,
+                        fragments=self.fragments,
+                        simulate=self.simulate
+                    )
+                    retry_downloader.run()
 
 
 def main():
@@ -468,7 +661,7 @@ def main():
             line = line.strip()
             if not line or "|" not in line:
                 continue
-            parts = line.split("|", 1)
+            parts = line.split("|")
             viewkey = parts[0].strip()
             title = parts[1].strip() if len(parts) > 1 else viewkey
             if viewkey:

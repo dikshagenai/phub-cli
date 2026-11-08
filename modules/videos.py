@@ -72,10 +72,12 @@ seen = set()
 
 for a in soup.find_all("a", href=re.compile(r"view_video\.php\?viewkey=")):
     href = a.get("href", "")
-    title = a.get("title", "").strip()
+    title = a.get("title", "").strip() or a.get_text(strip=True)
 
-    if not title:
+    if not title or title.lower() in ("play all", "playlist"):
         continue
+
+    title = title.replace("|", "-").replace("\n", " ").strip()
 
     match = re.search(r"viewkey=([a-zA-Z0-9]+)", href)
     if not match:
@@ -87,4 +89,28 @@ for a in soup.find_all("a", href=re.compile(r"view_video\.php\?viewkey=")):
         continue
 
     seen.add(viewkey)
-    print(f"{viewkey}|{title}")
+
+    parent = a.find_parent(["li", "div"], class_=re.compile(r"videoBox|pcVideoListItem|videoblock|phimage", re.I)) or a.find_parent(["li", "div"])
+
+    img = parent.find("img") if parent else a.find("img")
+    thumb_url = ""
+    if img:
+        for attr in ["data-thumb_url", "data-src", "data-mediumthumb", "data-image", "src"]:
+            v = img.get(attr, "").strip()
+            if v and not v.startswith("data:") and "blank.gif" not in v:
+                thumb_url = ("https:" + v) if v.startswith("//") else v
+                break
+
+    duration = ""
+    if parent:
+        d_tag = parent.find(["var", "span"], class_=re.compile(r"duration", re.I))
+        if d_tag:
+            duration = d_tag.get_text(strip=True)
+
+    rating = ""
+    if parent:
+        r_tag = parent.find(["span", "div"], class_=re.compile(r"value|rating", re.I))
+        if r_tag:
+            rating = r_tag.get_text(strip=True)
+
+    print(f"{viewkey}|{title}|{thumb_url}|{duration}|{rating}")

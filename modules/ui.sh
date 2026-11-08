@@ -114,7 +114,7 @@ show_home() {
     printf '%b\n' "${indent_text}${DEEP_PINK}    ${UNDERLINE}terminal video browser${NC}"
     printf '%b\n' "${indent_text}${PINK}  lust-driven streaming experience${NC}"
     printf '\n'
-    printf '%b\n' "${indent_text}${GOLD}                v0.4.0${NC}"
+    printf '%b\n' "${indent_text}${GOLD}                v0.5.0${NC}"
     printf '\n'
 
     if [ "${PHUBCLI_UPDATE_AVAILABLE}" = "1" ]; then
@@ -123,6 +123,9 @@ show_home() {
     fi
 
     local auto_mode="${1:-off}"
+    local cur_sort="${2:-relevance}"
+    local cur_dur="${3:-all}"
+    local cur_folder="${4:-~/Videos/phub-cli}"
     local mode_label
     case "$auto_mode" in
         on|multi) mode_label="multi" ;;
@@ -130,16 +133,92 @@ show_home() {
         *) mode_label="off" ;;
     esac
 
+    local filter_label="${cur_sort}/${cur_dur}"
+
     _ui_box_top "$inner_w"
     _ui_menu_line "$inner_w" "[1]" "Browse categories"
     _ui_menu_line "$inner_w" "[2]" "Search videos"
-    _ui_menu_line "$inner_w" "[3]" "Autodownload: [ $mode_label ]"
+    _ui_menu_line "$inner_w" "[3]" "Discovery feeds"
+    _ui_menu_line "$inner_w" "[4]" "Favorites"
+    _ui_menu_line "$inner_w" "[5]" "Watch history"
+    _ui_menu_line "$inner_w" "[6]" "Autodownload: [ $mode_label ]"
+    _ui_menu_line "$inner_w" "[7]" "Download folder: [ $cur_folder ]"
+    _ui_menu_line "$inner_w" "[s]" "Search filters: [ $filter_label ]"
     _ui_menu_line "$inner_w" "[u]" "Update phub-cli"
     _ui_menu_line "$inner_w" "[q]" "Quit"
     _ui_box_bottom "$inner_w"
     printf '\n'
 
     printf '%b\n' "${indent_text}${DEEP_PINK}Tip:${NC} ${PINK}Use arrow keys + Enter. Esc cancels fzf.${NC}"
+}
+
+feed_menu() {
+    local w=46
+    printf '\n' > /dev/tty
+    _ui_box_top "$w" > /dev/tty
+    _ui_box_title "$w" "Discovery Feeds" > /dev/tty
+    _ui_menu_line "$w" "[1]" "Trending / Hot" > /dev/tty
+    _ui_menu_line "$w" "[2]" "Top Rated" > /dev/tty
+    _ui_menu_line "$w" "[3]" "Most Viewed" > /dev/tty
+    _ui_menu_line "$w" "[4]" "Most Recent" > /dev/tty
+    _ui_menu_line "$w" "[5]" "Longest" > /dev/tty
+    _ui_menu_line "$w" "[b]" "Back" > /dev/tty
+    _ui_box_bottom "$w" > /dev/tty
+    printf '\n' > /dev/tty
+
+    read -r -p "$(printf '%b' "${HOT_PINK}Select feed ❯ ${NC}")" choice < /dev/tty
+    echo "$choice"
+}
+
+search_filter_menu() {
+    local cur_sort="${1:-relevance}"
+    local cur_dur="${2:-all}"
+    local w=46
+    printf '\n' > /dev/tty
+    _ui_box_top "$w" > /dev/tty
+    _ui_box_title "$w" "Search Filters" > /dev/tty
+    _ui_menu_line "$w" "[1]" "Sort: [ $cur_sort ]" > /dev/tty
+    _ui_menu_line "$w" "[2]" "Duration: [ $cur_dur ]" > /dev/tty
+    _ui_menu_line "$w" "[3]" "Clear all filters" > /dev/tty
+    _ui_menu_line "$w" "[b]" "Done / Back" > /dev/tty
+    _ui_box_bottom "$w" > /dev/tty
+    printf '\n' > /dev/tty
+
+    read -r -p "$(printf '%b' "${HOT_PINK}Select filter option ❯ ${NC}")" choice < /dev/tty
+    echo "$choice"
+}
+
+sort_select_menu() {
+    local w=38
+    printf '\n' > /dev/tty
+    _ui_box_top "$w" > /dev/tty
+    _ui_box_title "$w" "Sort Order" > /dev/tty
+    _ui_menu_line "$w" "[1]" "Relevance (Default)" > /dev/tty
+    _ui_menu_line "$w" "[2]" "Most Recent" > /dev/tty
+    _ui_menu_line "$w" "[3]" "Most Viewed" > /dev/tty
+    _ui_menu_line "$w" "[4]" "Top Rated" > /dev/tty
+    _ui_menu_line "$w" "[5]" "Longest" > /dev/tty
+    _ui_box_bottom "$w" > /dev/tty
+    printf '\n' > /dev/tty
+
+    read -r -p "$(printf '%b' "${HOT_PINK}Select sort ❯ ${NC}")" choice < /dev/tty
+    echo "$choice"
+}
+
+duration_select_menu() {
+    local w=38
+    printf '\n' > /dev/tty
+    _ui_box_top "$w" > /dev/tty
+    _ui_box_title "$w" "Duration Filter" > /dev/tty
+    _ui_menu_line "$w" "[1]" "All Durations" > /dev/tty
+    _ui_menu_line "$w" "[2]" "Short (1-10 mins)" > /dev/tty
+    _ui_menu_line "$w" "[3]" "Medium (10-20 mins)" > /dev/tty
+    _ui_menu_line "$w" "[4]" "Long (20+ mins)" > /dev/tty
+    _ui_box_bottom "$w" > /dev/tty
+    printf '\n' > /dev/tty
+
+    read -r -p "$(printf '%b' "${HOT_PINK}Select duration ❯ ${NC}")" choice < /dev/tty
+    echo "$choice"
 }
 
 autodownload_menu() {
@@ -159,14 +238,100 @@ autodownload_menu() {
     echo "$choice"
 }
 
+download_dir_menu() {
+    local configured_path="$1"
+    local active_path="$2"
+    local is_fallback="$3"
+
+    local w=52
+    printf '\n' > /dev/tty
+    _ui_box_top "$w" > /dev/tty
+    _ui_box_title "$w" "Download Folder Settings" > /dev/tty
+    _ui_box_line_plain "$w" " Target folder:" > /dev/tty
+    _ui_box_line_plain "$w" "   ${configured_path}" > /dev/tty
+    if [ "$is_fallback" = "1" ]; then
+        _ui_box_line_plain "$w" " Status: ⚠️ [Fallback: ${active_path}]" > /dev/tty
+    else
+        _ui_box_line_plain "$w" " Status: ✅ [Writable & ready]" > /dev/tty
+    fi
+    _ui_menu_line "$w" "[1]" "Change download folder" > /dev/tty
+    _ui_menu_line "$w" "[2]" "Reset to default (~/Videos/phub-cli)" > /dev/tty
+    _ui_menu_line "$w" "[b]" "Done / Back" > /dev/tty
+    _ui_box_bottom "$w" > /dev/tty
+    printf '\n' > /dev/tty
+
+    read -r -p "$(printf '%b' "${HOT_PINK}Select option ❯ ${NC}")" choice < /dev/tty
+    echo "$choice"
+}
+
+change_download_dir_prompt() {
+    clear
+    local current_configured
+    current_configured=$(get_configured_download_dir)
+
+    echo "" > /dev/tty
+    echo -e "  ${HOT_PINK}📁 Change Download Folder${NC}" > /dev/tty
+    echo -e "  ${PINK}Current setting:${NC} ${GOLD}${current_configured}${NC}" > /dev/tty
+    echo "" > /dev/tty
+    echo -e "  ${GOLD}Tip:${NC} Enter full path or start with ~ (e.g. ~/Downloads/Pornhub)" > /dev/tty
+    echo -e "       Tab completion is supported. Leave blank to cancel." > /dev/tty
+    echo "" > /dev/tty
+
+    local new_path=""
+    read -e -r -p "$(printf '%b' "  ${HOT_PINK}New download path: ${NC}")" new_path < /dev/tty
+    new_path=$(echo "$new_path" | xargs)
+
+    if [ -z "$new_path" ]; then
+        return
+    fi
+
+    local exp_path
+    exp_path=$(expand_path "$new_path")
+
+    echo "" > /dev/tty
+    if is_dir_writable "$exp_path"; then
+        set_download_dir "$new_path"
+        echo -e "  ${GREEN}✅ Download folder updated to:${NC} ${GOLD}${new_path}${NC}" > /dev/tty
+    else
+        echo -e "  ${RED}❌ Warning: Location '${new_path}' is not writable or cannot be created.${NC}" > /dev/tty
+        echo -e "  ${ROSE}   (Automatic fallback will redirect downloads to ~/Videos/phub-cli)${NC}" > /dev/tty
+        echo "" > /dev/tty
+        read -r -p "$(printf '%b' "  ${HOT_PINK}Save this folder anyway? (y/N, default: n): ${NC}")" confirm_save < /dev/tty
+        case "$confirm_save" in
+            y|Y)
+                set_download_dir "$new_path"
+                echo "" > /dev/tty
+                echo -e "  ${GOLD}⚠️ Saved. Auto-fallback will activate when downloading.${NC}" > /dev/tty
+                ;;
+            *)
+                echo "" > /dev/tty
+                echo -e "  ${PINK}Cancelled. Kept previous folder setting.${NC}" > /dev/tty
+                ;;
+        esac
+    fi
+    echo "" > /dev/tty
+    read -r -p "  Press Enter to continue..." _ < /dev/tty
+}
+
 pre_play_menu() {
-    local w=38
+    local viewkey="${1:-}"
+    local is_fav=0
+    if [ -n "$viewkey" ] && command -v is_favorite >/dev/null 2>&1; then
+        is_favorite "$viewkey" && is_fav=1
+    fi
+
+    local w=42
     printf '\n' > /dev/tty
     _ui_box_top "$w" > /dev/tty
     _ui_box_title "$w" "Choose an action" > /dev/tty
     _ui_menu_line "$w" "[1]" "Watch" > /dev/tty
     _ui_menu_line "$w" "[2]" "Download" > /dev/tty
     _ui_menu_line "$w" "[3]" "Open in browser" > /dev/tty
+    if [ "$is_fav" -eq 1 ]; then
+        _ui_menu_line "$w" "[f]" "Remove from Favorites" > /dev/tty
+    else
+        _ui_menu_line "$w" "[f]" "Add to Favorites" > /dev/tty
+    fi
     _ui_menu_line "$w" "[b]" "Back" > /dev/tty
     _ui_box_bottom "$w" > /dev/tty
     printf '\n' > /dev/tty
@@ -193,11 +358,22 @@ quality_menu() {
 }
 
 post_play_menu() {
-    local w=38
+    local viewkey="${1:-}"
+    local is_fav=0
+    if [ -n "$viewkey" ] && command -v is_favorite >/dev/null 2>&1; then
+        is_favorite "$viewkey" && is_fav=1
+    fi
+
+    local w=42
     printf '\n' > /dev/tty
     _ui_box_top "$w" > /dev/tty
     _ui_box_title "$w" "What next?" > /dev/tty
     _ui_menu_line "$w" "[1]" "Replay" > /dev/tty
+    if [ "$is_fav" -eq 1 ]; then
+        _ui_menu_line "$w" "[f]" "Remove from Favorites" > /dev/tty
+    else
+        _ui_menu_line "$w" "[f]" "Add to Favorites" > /dev/tty
+    fi
     _ui_menu_line "$w" "[2]" "Back to results" > /dev/tty
     _ui_menu_line "$w" "[3]" "Back to home" > /dev/tty
     _ui_menu_line "$w" "[q]" "Quit" > /dev/tty

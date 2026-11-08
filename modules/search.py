@@ -6,17 +6,69 @@ import time
 import requests
 from bs4 import BeautifulSoup
 
-if len(sys.argv) < 2:
+SORT_MAP = {
+    "relevance": "",
+    "default": "",
+    "recent": "mr",
+    "mr": "mr",
+    "most_recent": "mr",
+    "views": "mv",
+    "mv": "mv",
+    "most_viewed": "mv",
+    "rating": "tr",
+    "tr": "tr",
+    "top_rated": "tr",
+    "longest": "lg",
+    "lg": "lg",
+    "hot": "ht",
+    "ht": "ht",
+}
+
+DURATION_MAP = {
+    "all": "",
+    "short": "1",
+    "1": "1",
+    "medium": "2",
+    "2": "2",
+    "long": "3",
+    "3": "3",
+}
+
+sort_choice = ""
+duration_choice = ""
+page = 1
+query_parts = []
+
+args = sys.argv[1:]
+i = 0
+while i < len(args):
+    arg = args[i]
+    if arg in ("--sort", "-s") and i + 1 < len(args):
+        sort_choice = args[i + 1].strip().lower()
+        i += 2
+    elif arg in ("--duration", "-d") and i + 1 < len(args):
+        duration_choice = args[i + 1].strip().lower()
+        i += 2
+    elif arg in ("--page", "-p") and i + 1 < len(args):
+        try:
+            page = int(args[i + 1])
+        except ValueError:
+            page = 1
+        i += 2
+    else:
+        query_parts.append(arg)
+        i += 1
+
+if not query_parts:
     sys.stderr.write("Error: Search query cannot be empty.\n")
     sys.exit(1)
 
-# Last arg is page number if it's a digit
-if len(sys.argv) > 2 and sys.argv[-1].isdigit():
-    page = int(sys.argv[-1])
-    query = " ".join(sys.argv[1:-1]).strip()
+# Check if last positional argument is page number (backwards compatibility)
+if len(query_parts) > 1 and query_parts[-1].isdigit():
+    page = int(query_parts[-1])
+    query = " ".join(query_parts[:-1]).strip()
 else:
-    page = 1
-    query = " ".join(sys.argv[1:]).strip()
+    query = " ".join(query_parts).strip()
 
 if not query:
     sys.stderr.write("Error: Search query cannot be empty.\n")
@@ -32,6 +84,13 @@ headers = {
 }
 
 params = {"search": query, "page": page}
+sort_val = SORT_MAP.get(sort_choice, "")
+if sort_val:
+    params["o"] = sort_val
+
+dur_val = DURATION_MAP.get(duration_choice, "")
+if dur_val:
+    params["filter_duration"] = dur_val
 
 base_urls = [
     "https://www.pornhub.org/video/search",
@@ -80,15 +139,12 @@ seen = set()
 
 for a in soup.find_all("a", href=re.compile(r"view_video\.php\?viewkey=")):
     href = a.get("href", "")
-    title = a.get("title", "").strip()
+    title = a.get("title", "").strip() or a.get_text(strip=True)
 
-    if not title:
+    if not title or title.lower() in ("play all", "playlist"):
         continue
 
-    title_l = title.lower()
-
-    if keywords and not any(k in title_l for k in keywords):
-        continue
+    title = title.replace("|", "-").replace("\n", " ").strip()
 
     match = re.search(r"viewkey=([a-zA-Z0-9]+)", href)
     if not match:
@@ -100,4 +156,28 @@ for a in soup.find_all("a", href=re.compile(r"view_video\.php\?viewkey=")):
         continue
 
     seen.add(viewkey)
-    print(f"{viewkey}|{title}")
+
+    parent = a.find_parent(["li", "div"], class_=re.compile(r"videoBox|pcVideoListItem|videoblock|phimage", re.I)) or a.find_parent(["li", "div"])
+
+    img = parent.find("img") if parent else a.find("img")
+    thumb_url = ""
+    if img:
+        for attr in ["data-thumb_url", "data-src", "data-mediumthumb", "data-image", "src"]:
+            v = img.get(attr, "").strip()
+            if v and not v.startswith("data:") and "blank.gif" not in v:
+                thumb_url = ("https:" + v) if v.startswith("//") else v
+                break
+
+    duration = ""
+    if parent:
+        d_tag = parent.find(["var", "span"], class_=re.compile(r"duration", re.I))
+        if d_tag:
+            duration = d_tag.get_text(strip=True)
+
+    rating = ""
+    if parent:
+        r_tag = parent.find(["span", "div"], class_=re.compile(r"value|rating", re.I))
+        if r_tag:
+            rating = r_tag.get_text(strip=True)
+
+    print(f"{viewkey}|{title}|{thumb_url}|{duration}|{rating}")
